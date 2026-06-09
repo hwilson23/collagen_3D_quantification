@@ -1,0 +1,3 @@
+[submodule "collagen_3D_multimetric-main/src/image_texture_analysis"]
+	path = collagen_3D_multimetric-main/src/image_texture_analysis
+	url = https://github.com/hwilson23/image_texture_analysis.git

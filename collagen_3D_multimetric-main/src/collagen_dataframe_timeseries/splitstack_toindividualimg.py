@@ -1,9 +1,13 @@
 import os
+import sys
+from pathlib import Path
 import tifffile
 
+sys.path.insert(0, str(Path(__file__).parents[2]))
+from config import PATHS
 
-input_dir = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\selectedpos\A1A2endpointmaskapplied"
-output_dir = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\selectedpos\A1A2endpointmaskapplied\maskapplied_individualimgs"
+input_dir  = str(PATHS["masked_output"])
+output_dir = str(PATHS["indiv_imgs"])
 
 os.makedirs(output_dir, exist_ok=True)
 

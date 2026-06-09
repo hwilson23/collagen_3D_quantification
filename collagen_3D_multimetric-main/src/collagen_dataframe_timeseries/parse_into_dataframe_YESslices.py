@@ -1,9 +1,14 @@
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import tifffile as tiff
 import itertools
 import re
+
+sys.path.insert(0, str(Path(__file__).parents[2]))
+from config import PATHS, EXTERNAL
 
 
 def load_csv(file, columns=None):
@@ -308,26 +313,26 @@ def collapse_identical_columns(df, groups):
 
 ##main
 
-# for timeseries - generating one csv for each time point 
+# for timeseries - generating one csv for each time point
 # since easier to iterate through or just select timepoint without large files
 
-dfCA = load_csv("G:/FluorescentCollagen/20260519_flucol_kpc_ows3/selectedpos/A1A2endpointmaskapplied/ctFIREout/results_test_masked_min30/ctfire_stats_per_slice.csv")
+dfCA = load_csv(str(PATHS["ctfire_results"] / "ctfire_stats_per_slice.csv"))
 dfCAreorg = reshape_CA(dfCA)
-dfTWOMBLI = load_csv(r"C:\Users\hwilson23\Desktop\TWOMBLI-master\TWOMBLI_v1\Twombli_Results_kpccluster2pos_20250518.csv")
+dfTWOMBLI = load_csv(str(EXTERNAL["twombli_csv"]))
 dfTWOMBLI = dfTWOMBLI.dropna(subset=["image_name"])
 dfTWOMBLI = twombli_slice_data(dfTWOMBLI)
 #print(dfTWOMBLI)
 
-#dftexture = process_img_folder("G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/texturemap",is_3d = 0)
+#dftexture = process_img_folder(str(PATHS["texture2d_ep"]), is_3d=0)
 #dftexture= reshape_texture(dftexture)
 
 mask_paths = {
-    "a1_masked": "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\pickedrois_cellmasks\\endpointmask",
-    "a2_masked": "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\pickedrois_cellmasks\\endpointmask",
-    "cell_masked": "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\pickedrois_cellmasks\\endpointmask"
+    "a1_masked":   str(PATHS["masks"]),
+    "a2_masked":   str(PATHS["masks"]),
+    "cell_masked": str(PATHS["masks"]),
 }
 
-dftexture3D = process_img_folder("G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\output_bksub_texture3D\\stitched", mask_paths, is_3d = 1)
+dftexture3D = process_img_folder(str(PATHS["texture3d"]), mask_paths, is_3d=1)
 dftexture3D = reshape_texture(dftexture3D)
 
 

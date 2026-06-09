@@ -16,6 +16,8 @@ File naming convention:
 
 import os
 import re
+import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -24,6 +26,9 @@ import matplotlib.pyplot as plt
 from types import SimpleNamespace
 import tifffile
 from collections import defaultdict
+
+sys.path.insert(0, str(Path(__file__).parents[2]))
+from config import PATHS, PARAMS
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -305,10 +310,10 @@ def build_overlay_zstacks(ol_files, stacks, output_dir):
 def main():
     
     args = SimpleNamespace(
-        input_dir  = "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\A1A2endpointmaskapplied\\ctFIREout",
-        output_dir = "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\A1A2endpointmaskapplied\\ctFIREout\\results_test_masked_min30",
-        stacks     = ["Pos0","Pos5"],
-        z_step     = 2.0,
+        input_dir  = str(PATHS["ctfire_out"]),
+        output_dir = str(PATHS["ctfire_results"]),
+        stacks     = PARAMS["stacks"],
+        z_step     = PARAMS["z_step"],
         no_overlay = False,
     )
 

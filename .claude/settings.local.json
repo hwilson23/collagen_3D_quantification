@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\('data/finalcollapsed_dataframe_byslice.csv'\\); print\\('Shape:', df.shape\\); print\\('Dtypes object cols:', [c for c in df.columns if df[c].dtype == object][:10]\\); print\\('Numeric cols count:', df.select_dtypes\\('number'\\).shape[1]\\); print\\('Sample conc:', df['concentration'].unique\\(\\) if 'concentration' in df.columns else 'missing'\\); print\\('Sample type:', df['type'].unique\\(\\) if 'type' in df.columns else 'missing'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(uv add *)",
+      "Bash(uv run *)"
+    ]
+  }
+}

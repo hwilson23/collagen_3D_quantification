@@ -6,20 +6,19 @@
 %https://github.com/Pedram-Parnianpour/VGLCM-TOP-3D-Texture-Analysis/tree/main 
 %https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0117759#sec003
 
-%user input
+%user input — edit glcm_config.m to change paths or parameters
 
 if isempty(gcp('nocreate'))
     parpool('local');
 end
 
-OPT.D = 1;                  % distance for offset computation
-OPT.NeighborSize = 1;       % neighborhood radius
-OPT.quantLevel = 8;        % number of gray level bins 
-OPT.glcm_properties = {'autoc','contr','corrm','corrp','cprom','cshad','dissi','energ','entro','homom','homop','maxpr','sosvh','savgh','svarh','senth','dvarh','denth','inf1h','inf2h','indnc','idmnc'};  % features to compute
-folder = "G:\FluorescentCollagen\20260427_flucol_ows3\20260427_texturemapdata\testbatch";
-%folder = "G:\FluorescentCollagen\20260427_flucol_ows3\20260427_texturemapdata";
-%folder = "G:\FluorescentCollagen\20260427_flucol_ows3\20260427_texturemapdata\test_groundtruthdata";
-outpath = "G:\FluorescentCollagen\20260427_flucol_ows3\20260427_texturemapdata\texture_3d_TOP_out";
+run(fullfile(fileparts(mfilename('fullpath')), 'glcm_config.m'));
+OPT.D              = CFG.D;
+OPT.NeighborSize   = CFG.NeighborSize;
+OPT.quantLevel     = CFG.quantLevel;
+OPT.glcm_properties = CFG.glcm_properties;
+folder  = CFG.folder_ep;
+outpath = CFG.outpath_TOP;
 cd(folder)
 %load file
 

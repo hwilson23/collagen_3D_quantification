@@ -1,13 +1,18 @@
 
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import tifffile as tiff
 import re
 
+sys.path.insert(0, str(Path(__file__).parents[2]))
+from config import PATHS
+
 # Directory paths
-image_dir = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\selectedpos\maskapplied_timeseries_stacks"
-mask_dir = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\selectedpos\pickedrois_cellmasks\endpointmask"
-output_dir = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\selectedpos\A1A2endpointmaskapplied"
+image_dir  = str(PATHS["masked_stacks"])
+mask_dir   = str(PATHS["masks"])
+output_dir = str(PATHS["masked_output"])
 
 # Create output directory if it doesn't exist
 os.makedirs(output_dir, exist_ok=True)

@@ -1,7 +1,12 @@
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import tifffile as tiff
+
+sys.path.insert(0, str(Path(__file__).parents[2]))
+from config import PATHS, EXTERNAL
 
 
 def load_csv(file, columns=None):
@@ -82,10 +87,10 @@ def extract_stack_key(filename):
 
 ##main
 
-dfCA = load_csv("G:/FluorescentCollagen/20260427_flucol_ows3/flucol_crops/ctFIREout/results_test_masked_min30/ctfire_stats_stack_summary.csv")
+dfCA = load_csv(str(PATHS["ctfire_results_ep"] / "ctfire_stats_stack_summary.csv"))
 dfCAreorg = reshape_CA(dfCA)
-dfTWOMBLI = load_csv("C:/Users/hwilson23/Desktop/TWOMBLI-master/TWOMBLI_v1/Twombli_Results_concentration_shgandflu.csv")
-dftexture = process_img_folder("G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/texturemap")
+dfTWOMBLI = load_csv(str(EXTERNAL["twombli_csv_ep"]))
+dftexture = process_img_folder(str(PATHS["texture2d_ep"]))
 dftexture= reshape_texture(dftexture)
 
 #fix twombli slice data to means
