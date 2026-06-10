@@ -10,7 +10,7 @@
 
 | Channel | Excitation | Label |
 |---|---|---|
-| NucBlue | 740 nm | Cell autofluorescence |
+| NucBlue | 800 nm | Cell nuclei |
 | Fluorescent collagen | 800 nm | No-SHG collagen marker |
 | SHG collagen | 890 nm | Forward/backward SHG |
 
