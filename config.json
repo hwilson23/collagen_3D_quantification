@@ -6,25 +6,25 @@
   "experiment_endpoint": "20260427_flucol_ows3",
 
   "external": {
-    "twombli_csv":    "C:/Users/hwilson23/Desktop/TWOMBLI-master/TWOMBLI_v1/Twombli_Results_kpccluster2pos_20250518.csv",
-    "twombli_csv_ep": "C:/Users/hwilson23/Desktop/TWOMBLI-master/TWOMBLI_v1/Twombli_Results_concentration_shgandflu.csv"
+    "twombli_csv":    "",
+    "twombli_csv_ep": ""
   },
 
   "params": {
     "z_step":     2.0,
-    "stacks":     ["Pos0", "Pos5"],
+    "stacks":     ["Pos0", "Pos1", "Pos2", "Pos4", "Pos5", "Pos6"],
     "min_fibers": 30
   },
 
   "glcm": {
     "_comment": "Paths for each MATLAB script variant. folder_ep/outpath_ep = endpoint experiment; _ts = timeseries; _gpu = GPU variant.",
-    "folder_ep":   "G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/testbatch",
-    "outpath_ep":  "G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/texture_3d_matlab",
-    "outpath_TOP": "G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/texture_3d_TOP_out",
-    "folder_ts":   "C:/Users/hwilson23/Documents/Helen/flucol594_kpcclusters_800nm_poc0_60745_20x_g55_1/rawimages/selectedpos",
-    "outpath_ts":  "C:/Users/hwilson23/Documents/Helen/flucol594_kpcclusters_800nm_poc0_60745_20x_g55_1/rawimages/selectedpos_rawtexture3D",
-    "folder_gpu":  "C:/Users/hwilson23/Documents/Helen/texturemap",
-    "outpath_gpu": "C:/Users/hwilson23/Documents/Helen/gpuoutput_texture3d",
+    "folder_ep":   "",
+    "outpath_ep":  "",
+    "outpath_TOP": "",
+    "folder_ts":   "G:/FluorescentCollagen/20260519_flucol_kpc_ows3/20260519_hoescht_col_channels/maskapplied_timeseries_stacks",
+    "outpath_ts":  "G:/FluorescentCollagen/20260519_flucol_kpc_ows3/20260519_stained_analysis/output_bksub_texture3D",
+    "folder_gpu":  "",
+    "outpath_gpu": "",
 
     "D":              1,
     "NeighborSize":   1,
@@ -34,7 +34,7 @@
                          "svarh","senth","dvarh","denth","inf1h","inf2h","indnc","idmnc"],
 
     "num_timepoints": 25,
-    "num_z_slices":   28,
+    "num_z_slices":   46,
     "num_quadrants":  4
   }
 }

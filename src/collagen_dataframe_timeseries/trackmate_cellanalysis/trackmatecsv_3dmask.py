@@ -5,6 +5,8 @@ os.environ['MKL_NUM_THREADS'] = '4'
 import numpy as np
 import tifffile
 import pandas as pd
+import re
+import matplotlib.pyplot as plt
 from scipy.ndimage import distance_transform_edt
 from collections import defaultdict
 from scipy.optimize import curve_fit
@@ -14,13 +16,17 @@ from sklearn.mixture import GaussianMixture
 # PARAMETERS — edit these
 # =============================================================================
 
-csv_path          = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis\AVG_C2-flucol594_bkokpcwhoescht_Pos0_spots.csv"
-image_path        = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_hoescht_col_channels\C2-flucol594_bkokpcwhoescht_800nm_blank_44530_37010_blank_g558555...scht_800nm_blank_44530_37010_blank_g558555_poc0_1_MMStack_Pos0.tif"
-out_dir           = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis"
+csv_path          = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis\AVG_C2-flucol594_bkokpcwhoescht_Pos6_spots.csv"
+image_path        = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_hoescht_col_channels\C2-flucol594_bkokpcwhoescht_800nm_blank_44530_37010_blank_g558555...scht_800nm_blank_44530_37010_blank_g558555_poc0_1_MMStack_Pos6.tif"
+out_dir           = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis\trackmatemasks"
+
+
+pos_match = re.search(r'Pos(\d+)', csv_path)
+pos_tag   = f"Pos{pos_match.group(1)}" if pos_match else ""
 
 xy_pixel_um       = 0.276   # microns per XY pixel
 z_step_um         = 2.0     # microns per Z slice
-sphere_radius_um  = 10.0    # sphere radius in microns (isotropic in physical space)
+sphere_radii  = [10.0, 20.0, 30.0]  # sphere radius in microns (isotropic in physical space)
 z_profile_disk_px = 10      # XY disk radius (pixels) used to compute Z intensity profile
 
 # Boundary behaviour toggle:
@@ -104,10 +110,14 @@ def find_z_peaks(z_profile, max_components=3):
     """
     z = np.arange(len(z_profile))
     
+    
+
     # Normalise profile to use as a probability-like weight
     p = z_profile - z_profile.min()
     p = p / p.sum() if p.sum() > 0 else np.ones(len(z)) / len(z)
     
+
+
     # Weighted sample: repeat each z index proportional to its intensity
     samples = np.repeat(z, np.round(p * 1000).astype(int))[:, None]
     
@@ -132,15 +142,22 @@ def find_z_peaks(z_profile, max_components=3):
                   key=lambda x: -x[1])
 
 def find_z_center(image_tzyx, t, center_row, center_col,
-                         disk_radius_px, n_z, label=""):
+                         disk_radius_px, n_z, label="", save_disk=False, disk_dir = None):
     H, W = image_tzyx.shape[2], image_tzyx.shape[3]
     rows, cols = np.ogrid[:H, :W]
     disk = ((rows - center_row)**2 + (cols - center_col)**2) <= disk_radius_px**2
-
     z_profile = np.array([
-        image_tzyx[t, z][disk].mean() if disk.any() else 0.0
-        for z in range(n_z)
-    ])
+        image_tzyx[t,z][disk].mean() if disk.any() else 0.0
+        for z in range(n_z)])
+    '''
+    plt.figure()
+    plt.plot(z_profile, label='Z profile')
+    plt.xlabel('Z Slice')
+    plt.ylabel('Intensity')
+    plt.title('Z Profile Analysis')
+    plt.legend()
+    plt.show()
+    '''
 
     peaks = find_z_peaks(z_profile, max_components=2)
     z_center = int(round(float(peaks[0][0])))  # scalar int, safe for paint_sphere
@@ -152,6 +169,27 @@ def find_z_center(image_tzyx, t, center_row, center_col,
     else:
         print(f"    {label} z_center={z_center}")
     
+    '''
+    ## TODO: optional overalay but need to combine into z stack for saving
+    if save_disk:
+        img = image_tzyx[t, z_center].copy()
+
+        # Normalize for viewing
+        img = img.astype(np.float32)
+        img -= img.min()
+        if img.max() > 0:
+            img /= img.max()
+
+        overlay = np.stack([img, img, img], axis=-1)
+
+        # Color the disk red
+        overlay[disk] = [1, 0, 0]
+
+        tifffile.imwrite(
+            os.path.join(disk_dir, "overlay", f"{pos_tag}_particle{label}_t{t:03d}_overlay.tif"),
+            (overlay * 255).astype(np.uint8)
+        )
+    '''
     return z_center, z_profile, peaks
 
 # =============================================================================
@@ -226,8 +264,8 @@ def create_3d_sphere_masks(image_tzyx, particles,
         painted_ids = []
         for particle_id, row, col in active:
             z_center, z_profile, peaks = find_z_center(
-                image_tzyx, t_abs, row, col, z_profile_disk_px, n_z
-            )
+                image_tzyx, t_abs, row, col, z_profile_disk_px, n_z,particle_id, save_disk=True, disk_dir=out_dir)
+            
             print(f"Z center for particle {particle_id} at t={t_abs}: {z_center}", end='\r')
             
             paint_sphere(label_ztyx[:, t_rel, :, :], particle_id + 1, row, col, z_center, r_xy_px, r_z_px)
@@ -242,80 +280,78 @@ def create_3d_sphere_masks(image_tzyx, particles,
 
 if __name__ == '__main__':
 
-    import re
+    for sphere_radius_um in sphere_radii:
+        # Derived parameters (for reporting)
+        r_xy_px    = sphere_radius_um / xy_pixel_um
+        r_z_px     = sphere_radius_um / z_step_um
+        z_margin   = int(np.ceil(r_z_px))
 
-    # Derived parameters (for reporting)
-    r_xy_px    = sphere_radius_um / xy_pixel_um
-    r_z_px     = sphere_radius_um / z_step_um
-    z_margin   = int(np.ceil(r_z_px))
+        # ── Load image ──────────────────────────────────────────────────────────
+        print("Loading image...")
+        raw = tifffile.imread(image_path)
+        print(f"  Raw shape: {raw.shape}")
 
-    # ── Load image ──────────────────────────────────────────────────────────
-    print("Loading image...")
-    raw = tifffile.imread(image_path)
-    print(f"  Raw shape: {raw.shape}")
+        # Transpose (Z, T, X, Y) → (T, Z, Y, X)
+        # Adjust axis order here if your file differs
+        image_tzyx = raw
+        print(f"  After transpose (T, Z, Y, X): {image_tzyx.shape}")
 
-    # Transpose (Z, T, X, Y) → (T, Z, Y, X)
-    # Adjust axis order here if your file differs
-    image_tzyx = raw
-    print(f"  After transpose (T, Z, Y, X): {image_tzyx.shape}")
+        n_t, n_z, H, W = image_tzyx.shape
+        print(f"  T={n_t}  Z={n_z}  Y={H}  X={W}")
 
-    n_t, n_z, H, W = image_tzyx.shape
-    print(f"  T={n_t}  Z={n_z}  Y={H}  X={W}")
+        # ── Parse CSV ───────────────────────────────────────────────────────────
+        print("Parsing TrackMate CSV...")
+        particles = parse_spots_csv(csv_path)
+        n_particles = len(particles)
+        print(f"  {n_particles} tracks loaded")
 
-    # ── Parse CSV ───────────────────────────────────────────────────────────
-    print("Parsing TrackMate CSV...")
-    particles = parse_spots_csv(csv_path)
-    n_particles = len(particles)
-    print(f"  {n_particles} tracks loaded")
+        all_frames = [t for track in particles for t in track.keys()]
+        t_min, t_max = min(all_frames), max(all_frames)
+        print(f"  Frame range: {t_min}–{t_max}")
+        print(f"  Sphere radius: {sphere_radius_um} µm  "
+            f"= {r_xy_px:.1f} XY px,  {r_z_px:.1f} Z slices")
+        print(f"  Z boundary mode: {'clip (truncate sphere)' if clip_z_boundary else 'exclude cell'}")
+        if not clip_z_boundary:
+            print(f"  Cells excluded if z_center < {z_margin} or > {n_z - z_margin - 1}")
 
-    all_frames = [t for track in particles for t in track.keys()]
-    t_min, t_max = min(all_frames), max(all_frames)
-    print(f"  Frame range: {t_min}–{t_max}")
-    print(f"  Sphere radius: {sphere_radius_um} µm  "
-          f"= {r_xy_px:.1f} XY px,  {r_z_px:.1f} Z slices")
-    print(f"  Z boundary mode: {'clip (truncate sphere)' if clip_z_boundary else 'exclude cell'}")
-    if not clip_z_boundary:
-        print(f"  Cells excluded if z_center < {z_margin} or > {n_z - z_margin - 1}")
-
-    # ── Build masks ─────────────────────────────────────────────────────────
-    print("Building 3D sphere masks...")
-    label_ztyx, per_cell, t_min, t_max = create_3d_sphere_masks(
-        image_tzyx, particles,
-        xy_pixel_um, z_step_um,
-        sphere_radius_um, z_profile_disk_px,
-        clip_z_boundary
-    )
-    
-
-
-    # ── Save per-cell masks ─────────────────────────────────────────────────
-    pos_match = re.search(r'Pos(\d+)', csv_path)
-    pos_tag   = f"Pos{pos_match.group(1)}" if pos_match else ""
-    rad_tag   = f"r{int(sphere_radius_um)}um"
-
-    cell_dir = os.path.join(out_dir, f"masks3d_per_cell{pos_tag}_{rad_tag}")
-    os.makedirs(cell_dir, exist_ok=True)
-    print(f"Saving {n_particles} per-cell masks → {cell_dir}/")
-
-    
-    #write binary masks for each cell
-    for pid, cell_vol in enumerate(per_cell):
-        # Skip cells that were never painted (all zeros)
-        if cell_vol.max() == 0:
-            print(f"  Particle {pid:04d}: no frames painted, skipping")
-            continue
-        cell_path = os.path.join(cell_dir, f"{pos_tag}_{rad_tag}_cell_{pid:04d}.tif")
+        # ── Build masks ─────────────────────────────────────────────────────────
+        print("Building 3D sphere masks...")
+        label_ztyx, per_cell, t_min, t_max = create_3d_sphere_masks(
+            image_tzyx, particles,
+            xy_pixel_um, z_step_um,
+            sphere_radius_um, z_profile_disk_px,
+            clip_z_boundary
+        )
         
+
+
+        # ── Save per-cell masks ─────────────────────────────────────────────────
         
-        cell_vol = np.transpose(cell_vol, (1, 0, 2, 3))  # (Z, T, Y, X) → (T, Z, Y, X)
-        tifffile.imwrite(cell_path, np.uint16(cell_vol), imagej=True,
+        rad_tag   = f"r{int(sphere_radius_um)}um"
+
+        cell_dir = os.path.join(out_dir, f"masks3d_per_cell_{pos_tag}_{rad_tag}")
+        os.makedirs(cell_dir, exist_ok=True)
+        print(f"Saving {n_particles} per-cell masks → {cell_dir}/")
+
+        
+        #write binary masks for each cell
+        for pid, cell_vol in enumerate(per_cell):
+            # Skip cells that were never painted (all zeros)
+            if cell_vol.max() == 0:
+                print(f"  Particle {pid:04d}: no frames painted, skipping")
+                continue
+            cell_path = os.path.join(cell_dir, f"{pos_tag}_{rad_tag}_cell_{pid:04d}.tif")
+            
+            
+            cell_vol = np.transpose(cell_vol, (1, 0, 2, 3))  # (Z, T, Y, X) → (T, Z, Y, X)
+            tifffile.imwrite(cell_path, np.uint16(cell_vol), imagej=True,
+                            metadata={'axes': 'TZYX'})
+            
+        #write combined label volume
+        label_path = os.path.join(out_dir, f"masks3d_combined_{pos_tag}_{rad_tag}.tif")
+        label_ztyx = np.transpose(label_ztyx, (1, 0, 2, 3))  # (Z, T, Y, X) → (T, Z, Y, X)
+        tifffile.imwrite(label_path, np.uint16(label_ztyx), imagej=True,
                         metadata={'axes': 'TZYX'})
-        
-    #write combined label volume
-    label_path = os.path.join(out_dir, f"masks3d_combined{pos_tag}_{rad_tag}.tif")
-    label_ztyx = np.transpose(label_ztyx, (1, 0, 2, 3))  # (Z, T, Y, X) → (T, Z, Y, X)
-    tifffile.imwrite(label_path, np.uint16(label_ztyx), imagej=True,
-                    metadata={'axes': 'TZYX'})
 
-    print(f"Done. {sum(1 for c in per_cell if c.max() > 0)} / {n_particles} "
-          f"cells saved.")
+        print(f"Done. {sum(1 for c in per_cell if c.max() > 0)} / {n_particles} "
+            f"cells saved.")

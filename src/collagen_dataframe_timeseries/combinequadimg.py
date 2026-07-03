@@ -4,8 +4,9 @@ import numpy as np
 import tifffile as tiff
 
 # Folder containing quadrant TIFFs
-input_folder = Path("G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\output_bksub_texture3D\\")
-output_folder = input_folder / "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\output_bksub_texture3D\\stitched"
+#input_folder = Path("G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\selectedpos\\output_bksub_texture3D\\")
+input_folder = Path("G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\20260519_stained_analysis\\output_bksub_texture3D")
+output_folder = input_folder / "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\20260519_stained_analysis\\output_bksub_texture3D\\stitched"
 output_folder.mkdir(exist_ok=True)
 
 # Regex to detect quadrant number
@@ -14,7 +15,9 @@ quad_pattern = re.compile(r"_quad(\d+)")
 # Group files by removing the quadrant part from filename
 groups = {}
 
-for file in input_folder.glob("*.tif*"):
+print(len(list(input_folder.glob("*.tif"))))
+
+for file in input_folder.glob("*.tif"):
     match = quad_pattern.search(file.name)
 
     if not match:
@@ -71,4 +74,4 @@ for key, quads in groups.items():
     stitched = np.moveaxis(stitched, -1, 0)
     tiff.imwrite(output_path, stitched)
 
-    print(f"Saved: {output_path}")
+    #print(f"Saved: {output_path}")

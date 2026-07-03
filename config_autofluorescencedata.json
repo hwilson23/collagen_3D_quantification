@@ -1,0 +1,40 @@
+{
+  "_comment": "Single source of truth for all paths and parameters. Edit here — Python and MATLAB both read this file.",
+
+  "data_root": "G:/FluorescentCollagen",
+  "experiment": "20260519_flucol_kpc_ows3",
+  "experiment_endpoint": "20260427_flucol_ows3",
+
+  "external": {
+    "twombli_csv":    "C:/Users/hwilson23/Desktop/TWOMBLI-master/TWOMBLI_v1/Twombli_Results_kpccluster2pos_20250518.csv",
+    "twombli_csv_ep": "C:/Users/hwilson23/Desktop/TWOMBLI-master/TWOMBLI_v1/Twombli_Results_concentration_shgandflu.csv"
+  },
+
+  "params": {
+    "z_step":     2.0,
+    "stacks":     ["Pos0", "Pos5"],
+    "min_fibers": 30
+  },
+
+  "glcm": {
+    "_comment": "Paths for each MATLAB script variant. folder_ep/outpath_ep = endpoint experiment; _ts = timeseries; _gpu = GPU variant.",
+    "folder_ep":   "G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/testbatch",
+    "outpath_ep":  "G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/texture_3d_matlab",
+    "outpath_TOP": "G:/FluorescentCollagen/20260427_flucol_ows3/20260427_texturemapdata/texture_3d_TOP_out",
+    "folder_ts":   "C:/Users/hwilson23/Documents/Helen/flucol594_kpcclusters_800nm_poc0_60745_20x_g55_1/rawimages/selectedpos",
+    "outpath_ts":  "C:/Users/hwilson23/Documents/Helen/flucol594_kpcclusters_800nm_poc0_60745_20x_g55_1/rawimages/selectedpos_rawtexture3D",
+    "folder_gpu":  "C:/Users/hwilson23/Documents/Helen/texturemap",
+    "outpath_gpu": "C:/Users/hwilson23/Documents/Helen/gpuoutput_texture3d",
+
+    "D":              1,
+    "NeighborSize":   1,
+    "quantLevel":     8,
+    "glcm_properties": ["autoc","contr","corrm","corrp","cprom","cshad","dissi",
+                         "energ","entro","homom","homop","maxpr","sosvh","savgh",
+                         "svarh","senth","dvarh","denth","inf1h","inf2h","indnc","idmnc"],
+
+    "num_timepoints": 25,
+    "num_z_slices":   28,
+    "num_quadrants":  4
+  }
+}
