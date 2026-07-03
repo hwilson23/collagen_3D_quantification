@@ -16,19 +16,19 @@ DATA_ROOT  = Path(_cfg["data_root"])
 EXPERIMENT = _cfg["experiment"]
 
 _base = DATA_ROOT / EXPERIMENT
-_sel  = _base / "20240519_stained_analysis"
+_sel  = _base / "selectedpos"
 _base_ep = DATA_ROOT / _cfg["experiment_endpoint"]
 
 PATHS = {
-    "masked_stacks":     _sel / " ",
-    "masks":             _sel / "trackmatemasks",
-    "masked_output":     _sel / " ",
-    "indiv_imgs":        _sel / " ",
-    "ctfire_out":        _sel / " ",
-    "ctfire_results":    _sel / " ",
+    "masked_stacks":     _sel / "maskapplied_timeseries_stacks",
+    "masks":             _sel / "pickedrois_cellmasks" / "endpointmask",
+    "masked_output":     _sel / "A1A2endpointmaskapplied",
+    "indiv_imgs":        _sel / "A1A2endpointmaskapplied" / "maskapplied_individualimgs",
+    "ctfire_out":        _sel / "A1A2endpointmaskapplied" / "ctFIREout",
+    "ctfire_results":    _sel / "A1A2endpointmaskapplied" / "ctFIREout" / "results_test_masked_min30",
     "texture3d":         _sel / "output_bksub_texture3D" / "stitched",
-    "ctfire_results_ep": _base_ep / " ",
-    "texture2d_ep":      _base_ep / " ",
+    "ctfire_results_ep": _base_ep / "flucol_crops" / "ctFIREout" / "results_test_masked_min30",
+    "texture2d_ep":      _base_ep / "20260427_texturemapdata" / "texturemap",
 }
 
 EXTERNAL = {k: Path(v) for k, v in _cfg["external"].items()}
