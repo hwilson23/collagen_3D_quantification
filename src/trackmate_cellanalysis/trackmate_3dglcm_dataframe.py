@@ -9,7 +9,7 @@ import itertools
 import re
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
-from config import PATHS, EXTERNAL
+from config import PATHS, PARAMS
 
 
 def reshape_texture(df):
@@ -62,35 +62,37 @@ def compute_stats(pixels):
         "texture3d_std": np.std(pixels),
     }
 
-def image_stats_glcm3D(imagepath, mask_paths_dict, stackstats):
+def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
 
     nospace_name = os.path.basename(imagepath).replace(" ", "")
 
     img = tiff.imread(imagepath)
     img = np.moveaxis(img, 0, -1)
+    
 
     idx = nospace_name.find("3D")
-    timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))
+    timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
 
-    m = re.search(r'Pos(\d+)', nospace_name)
-    pos = int(m.group(1)) if m else None
     # Load masks
     masks = {}
     for mask_name, folder_path in mask_paths_dict.items():
         for fname in os.listdir(folder_path):
         # must match BOTH position and mask type
-            if (f"Pos{pos}" in fname) and (mask_name in fname):
+            if (pos in fname) and (mask_name in fname):
 
-                print(f"Loading mask: {fname} for position: {pos} and mask type: {mask_name}, timepoint is {timepoint}, cell number is {re.search(r'cell(\d+)', mask_name).group(1)}")
                 full_path = os.path.join(folder_path, fname)
 
                 mask_img = tiff.imread(full_path)
-                mask_img = np.transpose(mask_img,(2,3,0,1))
-                mask_img = mask_img[:,:,:,timepoint]
-
-                masks[mask_name] = mask_img
+                #print(mask_img.shape)
+                mask_img = np.transpose(mask_img,(2,3,1,0))
+                mask_img = mask_img[:,:,:,timepoint]  
+                #print(f"Image shape for {fname}: {img.shape}, Mask shape for {mask_name}: {mask_img.shape}")
+                
+                masks[mask_name]={'mask_stack': mask_img, 'timepoint':timepoint,'cell':re.search(r'cell_(\d+)', fname).group(1)}
+                #masks[mask_name] = mask_img
     #print(masks)
     for z in range(img.shape[2]):
+        print(f"Loading mask: {fname} for position: {pos} and mask type: {mask_name}, timepoint is {timepoint}, z is {z}, cell number is {re.search(r'cell_(\d+)', fname).group(1)}")
 
         currentim = img[:, :, z]
 
@@ -105,7 +107,7 @@ def image_stats_glcm3D(imagepath, mask_paths_dict, stackstats):
             "timepoint": nospace_name.split('_')[-7].split('t')[-1],
             "mask_type": "full",
             "texture_type": nospace_name.split('_')[-6],
-            "position": int(m.group(1)) if m else np.nan,
+            "position": re.search(r'Pos(\d+)',pos),
             "distance3d": nospace_name.split('_')[-4],
             "neighbor3d": nospace_name.split('_')[-3],
             "bin_num3d": nospace_name.split('_')[-2],
@@ -117,9 +119,9 @@ def image_stats_glcm3D(imagepath, mask_paths_dict, stackstats):
         # -----------------------------------
         # Masked stats
         # -----------------------------------
-        for mask_name, mask_stack in masks.items():
+        for mask_type, data in masks.items():       #here, make sure to save by cell 
 
-            current_mask = mask_stack[:, :, z]
+            current_mask = data["mask_stack"][:, :, z]
 
             masked_pixels = currentim[current_mask > 0]
 
@@ -127,11 +129,12 @@ def image_stats_glcm3D(imagepath, mask_paths_dict, stackstats):
             #print("Stats for mask:", mask_name, stats)
             imgstats = {
                 "slice": z + 1,
+                "cell": data["cell"],
                 "image_name": nospace_name[:idx-7],
-                "timepoint": nospace_name.split('_')[-7].split('t')[-1],
-                "mask_type": mask_name,
+                "timepoint": data["timepoint"],
+                "mask_type": mask_type,
                 "texture_type": nospace_name.split('_')[-6],
-                "position": int(m.group(1)) if m else np.nan,
+                "position": re.search(r'Pos(\d+)',pos).group(1),
                 "distance3d": nospace_name.split('_')[-4],
                 "neighbor3d": nospace_name.split('_')[-3],
                 "bin_num3d": nospace_name.split('_')[-2],
@@ -142,21 +145,23 @@ def image_stats_glcm3D(imagepath, mask_paths_dict, stackstats):
 
     return stackstats
 
-def process_img_folder(folder, mask_paths, is_3d):
+def process_img_folder(pos, folder, mask_paths, is_3d):
     stackstats = []
     if is_3d ==0:
         print("3d glcm required")
         stats = None
     elif is_3d ==1:
         for file in os.listdir(folder):
-            if file.endswith((".tif",".tiff")):
+            if pos in file and file.endswith((".tif",".tiff")):
                 full = os.path.join(folder,file)
                 stats = image_stats_glcm3D(
+                                    pos,
                                     full,
                                     mask_paths,
                                     stackstats
                                 )
-            
+        if stats is None:
+            print(f"No matching files found for position {pos} in folder {folder}.")
             #print(stats)
     return pd.DataFrame(stats)
 
@@ -212,14 +217,14 @@ def collapse_identical_columns(df, groups):
 if __name__ == "__main__":
     dftexture3D = pd.DataFrame()
 
-    for pos in stacks:
+    for pos in PARAMS["stacks"]:
         print(f"Processing position: {pos}")
 
         mask_paths = {
-            "a1_masked":   str(PATHS[f"masks3d_per_cell_{pos}_r20um"]),
-            "a2_masked":   str(PATHS[f"masks3d_per_cell_{pos}_r30um"]),
-            "cell_masked": str(PATHS[f"masks3d_per_cell_{pos}_r10um"]),
+            "r20":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r20um"),
+            "r30":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r30um"),
+            "r10": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r10um"),
         }
-        dftexture3D = dftexture3D.append(process_img_folder(str(PATHS["texture3d"]), mask_paths, is_3d=1), ignore_index=True)
+        dftexture3D = pd.concat([dftexture3D, process_img_folder(pos, str(PATHS["texture3d"]), mask_paths, is_3d=1)], ignore_index=True)
     
     dftexture3D = reshape_texture(dftexture3D)
