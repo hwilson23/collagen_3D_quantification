@@ -66,7 +66,7 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
 
     nospace_name = os.path.basename(imagepath).replace(" ", "")
 
-    img = tiff.imread(imagepath)
+    img = tiff.imread(imagepath, out='memmap')
     img = np.moveaxis(img, 0, -1)
     
 
@@ -82,7 +82,7 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
 
                 full_path = os.path.join(folder_path, fname)
 
-                mask_img = tiff.imread(full_path)
+                mask_img = tiff.imread(full_path, out='memmap')
                 #print(mask_img.shape)
                 mask_img = np.transpose(mask_img,(2,3,1,0))
                 mask_img = mask_img[:,:,:,timepoint]  
@@ -226,5 +226,5 @@ if __name__ == "__main__":
             "r10": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r10um"),
         }
         dftexture3D = pd.concat([dftexture3D, process_img_folder(pos, str(PATHS["texture3d"]), mask_paths, is_3d=1)], ignore_index=True)
-    
+        
     dftexture3D = reshape_texture(dftexture3D)
