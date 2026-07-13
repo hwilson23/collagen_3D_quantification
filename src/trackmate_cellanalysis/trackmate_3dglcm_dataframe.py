@@ -92,7 +92,7 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
                 #masks[mask_name] = mask_img
     #print(masks)
     for z in range(img.shape[2]):
-        print(f"Loading mask: {fname} for position: {pos} and mask type: {mask_name}, timepoint is {timepoint}, z is {z}, cell number is {re.search(r'cell_(\d+)', fname).group(1)}")
+        #print(f"Loading mask: {fname} for position: {pos} and mask type: {mask_name}, timepoint is {timepoint}, z is {z}, cell number is {re.search(r'cell_(\d+)', fname).group(1)}")
 
         currentim = img[:, :, z]
 

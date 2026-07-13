@@ -9,91 +9,214 @@ OPT.D              = CFG.D;
 OPT.NeighborSize   = CFG.NeighborSize;
 OPT.quantLevel     = CFG.quantLevel;
 OPT.glcm_properties = CFG.glcm_properties;
+OPT.HOWMANYZ = 168;
 folder  = CFG.folder_ep;
 outpath = CFG.outpath_ep;
 cd(folder)
 %load file
 
+
+time=1;
 files = dir(fullfile(folder, '*.tif'));
 filenames = {files.name};
 %disp({files.name})
 %mask file
 fprintf('Starting Time: %s\n',datestr(now));
+
+setmin = [];
+setmax = [];
+%{
 for i=1:length(filenames)
-    timerStart = tic;
-    imgpg1 = imread(string(fullfile(folder,filenames(i))));
-    disp(filenames(i))
-    [numRows, numCols, ~] = size(imgpg1);
-
-    % Get the total number of pages
-    info = imfinfo(string(fullfile(folder,filenames(i))));
-    numPages = length(info);
-
-    % Preallocate the 3D volume
-    volimg = zeros(numRows, numCols, numPages, class(imgpg1));
-
-    % Read each page and store it in the 3D volume
-    for page = 1:numPages
-        volimg(:, :, page) = imread(string(fullfile(folder,filenames(i))), page);
+    for z = 1:HOWMANYZ
+        img = imread(fullfile(folder, filenames(i)), z);
+        mask = (img>0);
+        img = img(mask);
+        imgmin = min(img,[],'all');
+        imgmax = max(img,[],'all');
+       
+        setmax = max([setmax,imgmax]);
+        setmin = min([setmin,imgmin]);
     end
+end
+fprintf('full dataset min/max (percentile): %f %f\n', setmin, setmax);
+%}
+histCounts = zeros(1, 65536);  % bins for intensity values 0-65535
 
-    volimg = double(volimg);
-    disp(size(volimg))
+for i = 1:length(filenames)
+    for z = 1:HOWMANYZ
+        img = imread(fullfile(folder, filenames(i)), z);
+        fg = img(img > 0);
+        if isempty(fg), continue; end
+        counts = histcounts(double(fg), 0:65536);  % edges 0,1,...,65536
+        histCounts = histCounts + counts;
+    end
+end
 
-    %createmask (assuming mask preapplied to image)
-    mask = volimg;
-    mask(mask>0) = 1;
-    mask = logical(mask);
+% compute percentile from cumulative histogram
+cdf = cumsum(histCounts) / sum(histCounts);
+globalLow  = find(cdf >= 0.005, 1, 'first') - 1;   % -1 to convert bin index back to intensity
+globalHigh = find(cdf >= 0.995, 1, 'first') - 1;
 
-    [d1,d2,d3] = ind2sub(size(mask), find(mask));
-    InsideRange = [min(d1) max(d1);min(d2) max(d2);min(d3) max(d3)];
-    origsize = size(volimg);
-    partialmask = mask(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2));
-    volimg = volimg(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2));
-    %disp(unique(volimg));
-    [~,justname,~] = fileparts(filenames(i));
-    glcmFile = fullfile(outpath,string([char(justname) '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.mat'])); 
-    disp('gclmfile')
-    disp(glcmFile)
+fprintf('full dataset percentile range: %d %d\n', globalLow, globalHigh);
+setmax = globalHigh;
+setmin = globalLow;
+p = ("continue? 1-yes/0-no");
+answerwas = input(p,"s")
+if answerwas == "0"
+   return
+end
     
-    if (exist(string(glcmFile), 'file') == 2)
-        GLCMS = load(glcmFile);
-        GLCMS = GLCMS.GLCMS;
-    else
-        GLCMS = CreateGLCM_Local(volimg,OPT.quantLevel,[min(volimg(:)) max(volimg(:))],OPT.D,OPT.NeighborSize,partialmask); 
-        m = matfile(glcmFile,'writable', true);
-        m.GLCMS = GLCMS;
-    end
-    texture = computeGLCMLocalFeat(GLCMS,partialmask,OPT.glcm_properties);        
-    time_total = toc(timerStart);
-    fprintf('Total time: %2.2f\n',time_total);
-     
-    for prop=1:length(OPT.glcm_properties)
-        img = squeeze(texture(:,:,:,prop)); 
-        img = (img-min(img(:))); %shift to not negative
-        img = img/max(img(:))*65535;
-        %disp(unique(img))
-        %disp(unique(img))
-        fullimg = zeros(origsize);
-        fullimg(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2)) = img;
-        %fullimg(double(mask)==0) = 0;
-        %fullimg = uint16(fullimg); %scaling to make sure small values not wiped
-        TextureFileName  = [justname '_' OPT.glcm_properties{prop} '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.tif'];
-        for z = 1:length(img(1,1,:))
-            slice = fullimg(:,:,z);
-            if z ==1
-                imwrite(uint16(slice),fullfile(outpath,join(TextureFileName)));
-            else
-                imwrite(uint16(slice),fullfile(outpath,join(TextureFileName)),'WriteMode','append')
+
+for i=1:length(filenames)
+    %for quadrant = 1:4
+    for section = 1:8
+    
+        timerStart = tic;
+        imgpg1 = imread(string(fullfile(folder,filenames(i))));
+        disp(filenames(i))
+        [numRows, numCols, ~] = size(imgpg1);
+        
+        % Get the total number of pages
+        info = imfinfo(string(fullfile(folder,filenames(i)))); 
+        numPages = length(info);
+    
+        
+    
+        % Preallocate the 3D volume
+        
+        halfHeight = floor(numRows/2);
+        halfWidth  = floor(numCols/2);
+        halfHeight = floor(numRows/2);
+        quarterWidth = floor(numCols/4);
+        %volimg = zeros(halfHeight, halfWidth, numPages, class(imgpg1));
+        volimg = zeros(halfHeight, quarterWidth, numPages, class(imgpg1));
+        tempimg = zeros(numRows, numCols,HOWMANYZ);
+        % Read each page and store it in the 3D volume
+        
+        startPage = (time - 1) * HOWMANYZ + 1;
+        
+        % Iterate over z-slices for this time point
+        for z = 1:HOWMANYZ
+            page = startPage + z - 1; % 1-based page index
+            img = imread(fullfile(folder, filenames(i)), page);
+            tempimg(:,:,z) = img;
+
             
+            %{
+            if quadrant == 1
+                % Top-left
+                volimg(:,:,z) = img(1:halfHeight, 1:halfWidth);
+        
+            elseif quadrant == 2
+                % Top-right
+                volimg(:,:,z) = img(1:halfHeight, halfWidth+1:end);
+        
+            elseif quadrant == 3
+                % Bottom-left
+                volimg(:,:,z) = img(halfHeight+1:end, 1:halfWidth);
+        
+            elseif quadrant == 4
+                % Bottom-right
+                volimg(:,:,z) = img(halfHeight+1:end, halfWidth+1:end);
+        
+            else
+                disp('quadrant error')
+            end
+            %}
+            
+
+            if section == 1
+                volimg(:,:,z) = img(1:halfHeight, 1:quarterWidth);
+
+            elseif section == 2
+                volimg(:,:,z) = img(1:halfHeight, quarterWidth+1:2*quarterWidth);
+
+            elseif section == 3
+                volimg(:,:,z) = img(1:halfHeight, 2*quarterWidth+1:3*quarterWidth);
+
+            elseif section == 4
+                volimg(:,:,z) = img(1:halfHeight, 3*quarterWidth+1:end);
+
+            elseif section == 5
+                volimg(:,:,z) = img(halfHeight+1:end, 1:quarterWidth);
+
+            elseif section == 6
+                volimg(:,:,z) = img(halfHeight+1:end, quarterWidth+1:2*quarterWidth);
+
+            elseif section == 7
+                volimg(:,:,z) = img(halfHeight+1:end, 2*quarterWidth+1:3*quarterWidth);
+
+            elseif section == 8
+                volimg(:,:,z) = img(halfHeight+1:end, 3*quarterWidth+1:end);
+
+            else
+                disp('section error')
             end
         end
         
-        
-    end
-    disp("files saved!")
+        volimg = double(volimg);
+        disp(size(volimg))
     
-end
+        %createmask (assuming mask preapplied to image)
+        mask = volimg;
+        mask(mask>0) = 1;
+        mask = logical(mask);
+    
+        [d1,d2,d3] = ind2sub(size(mask), find(mask));
+        InsideRange = [min(d1) max(d1);min(d2) max(d2);min(d3) max(d3)];
+        origsize = size(volimg);
+        partialmask = mask(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2));
+        volimg = volimg(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2));
+        %disp(unique(volimg));
+        [~,justname,~] = fileparts(filenames(i));
+        %glcmFile = fullfile(outpath,string([char(justname) '_quad' num2str(quadrant) '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.mat'])); 
+        glcmFile = fullfile(outpath,string([char(justname) '_sect' num2str(section) '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.mat'])); 
+        
+        disp('gclmfile')
+        disp(glcmFile)
+        
+        if (exist(string(glcmFile), 'file') == 2)
+            GLCMS = load(glcmFile);
+            GLCMS = GLCMS.GLCMS;
+        else
+            GLCMS = CreateGLCM_Local(volimg,OPT.quantLevel,[setmin,setmax],OPT.D,OPT.NeighborSize,partialmask); 
+            m = matfile(glcmFile,'writable', true);
+            m.GLCMS = GLCMS;
+        end
+        texture = computeGLCMLocalFeat(GLCMS,partialmask,OPT.glcm_properties);        
+        time_total = toc(timerStart);
+        fprintf('Total time: %2.2f\n',time_total);
+         
+        for prop=1:length(OPT.glcm_properties)
+            img = squeeze(texture(:,:,:,prop)); 
+            img = (img-min(img(:))); %shift to not negative
+            img = img/max(img(:))*65535;
+            %disp(unique(img))
+            %disp(unique(img))
+            fullimg = zeros(origsize);
+            fullimg(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2)) = img;
+            %fullimg(double(mask)==0) = 0;
+            %fullimg = uint16(fullimg); %scaling to make sure small values not wiped
+            %TextureFileName  = [justname '_quad' num2str(quadrant) '_t' num2str(time) '_' OPT.glcm_properties{prop} '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.tif'];
+            TextureFileName  = [justname '_sect' num2str(section) '_t' num2str(time) '_' OPT.glcm_properties{prop} '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.tif'];
+            
+            for a = 1:length(img(1,1,:))
+                slice = fullimg(:,:,a);
+                if a ==1
+                    imwrite(uint16(slice),fullfile(outpath,join(TextureFileName)));
+                else
+                    imwrite(uint16(slice),fullfile(outpath,join(TextureFileName)),'WriteMode','append')
+                
+                end
+            end
+            
+            
+        end
+    end
+        disp("files saved!")
+end    
+
+
 
 disp("saving files");
 %delete(gcp('nocreate'));
