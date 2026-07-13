@@ -13,36 +13,71 @@ from config import PATHS, PARAMS
 
 
 def reshape_texture(df):
-    # List of all possible value columns
-    possible_values = ["concentration",
-                        "type",
-                        "roi",
-                        "slice",
-                        "timepoint",
-                       "texture_mean",
-                       "texture_median",
-                       "texture_std", 
-                       "texture3d_mean", 
-                       "texture3d_median",
-                       "texture3d_std", 
-                       "distance3d", 
-                       "neighbor3d", 
-                       "bin_num3d"]
-    
-    # Filter to only include columns that exist in the dataframe
-    available_values = [col for col in possible_values if col in df.columns]
-    
-    if not available_values:
-        # If no values are available, just return the dataframe as-is
+    # Columns that are true metadata: constant per (image, slice, position, cell)
+    # regardless of mask_type/texture_type -- these should NOT be pivoted, just
+    # kept as a single column.
+    metadata_cols = [
+        "distance3d",
+        "neighbor3d",
+        "bin_num3d",
+        "concentration",
+        "type",
+        "roi",
+    ]
+    metadata_cols = [col for col in metadata_cols if col in df.columns]
+
+    # Columns that are genuinely computed per mask_type + texture_type -- these
+    # SHOULD be pivoted and keep the suffix.
+    stat_cols = [
+        "texture_mean",
+        "texture_median",
+        "texture_std",
+        "texture3d_mean",
+        "texture3d_median",
+        "texture3d_std",
+    ]
+    stat_cols = [col for col in stat_cols if col in df.columns]
+
+    index_cols = ["image_name", "slice", "position", "cell","timepoint"]
+
+    if not stat_cols:
         return df
-    
-    pivotdf = df.pivot(
-        index=["image_name","slice","position"],
-        columns = ["mask_type","texture_type"],
-        values = available_values
+
+    # --- Sanity check: confirm metadata cols are actually constant per index ---
+    # If a "metadata" column secretly varies by mask_type/texture_type for the
+    # same index group, collapsing it to one value would silently lose data.
+    # Warn instead of guessing.
+    safe_metadata_cols = []
+    for col in metadata_cols:
+        nunique_per_group = df.groupby(index_cols)[col].nunique(dropna=False)
+        if (nunique_per_group <= 1).all():
+            safe_metadata_cols.append(col)
+        else:
+            print(f"WARNING: '{col}' varies within an index group "
+                  f"(image_name/slice/position/cell) -- leaving it out of "
+                  f"collapse and it will NOT appear in the pivoted output. "
+                  f"Inspect this column manually.")
+
+    # --- Metadata: one row per index, no mask/texture suffix ---
+    if safe_metadata_cols:
+        meta_df = (
+            df.groupby(index_cols)[safe_metadata_cols]
+            .first()
+            .reset_index()
+        )
+    else:
+        meta_df = df[index_cols].drop_duplicates()
+
+    # --- Real stats: pivot on mask_type + texture_type, keep suffix ---
+    stat_df = df.pivot(
+        index=index_cols,
+        columns=["mask_type", "texture_type"],
+        values=stat_cols,
     )
-    pivotdf.columns = [f"{mask}_{stat}_{tex}" for mask, stat, tex in pivotdf.columns]
-    pivotdf = pivotdf.reset_index()
+    stat_df.columns = [f"{stat}_{mask}_{tex}" for stat, mask, tex in stat_df.columns]
+    stat_df = stat_df.reset_index()
+
+    pivotdf = meta_df.merge(stat_df, on=index_cols, how="right")
 
     return pivotdf
 
@@ -74,22 +109,23 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
     timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
 
     # Load masks
+    # Load masks
     masks = {}
     for mask_name, folder_path in mask_paths_dict.items():
+        masks[mask_name] = {}
         for fname in os.listdir(folder_path):
-        # must match BOTH position and mask type
             if (pos in fname) and (mask_name in fname):
-
                 full_path = os.path.join(folder_path, fname)
-
                 mask_img = tiff.imread(full_path, out='memmap')
-                #print(mask_img.shape)
                 mask_img = np.transpose(mask_img,(2,3,1,0))
-                mask_img = mask_img[:,:,:,timepoint]  
-                #print(f"Image shape for {fname}: {img.shape}, Mask shape for {mask_name}: {mask_img.shape}")
-                
-                masks[mask_name]={'mask_stack': mask_img, 'timepoint':timepoint,'cell':re.search(r'cell_(\d+)', fname).group(1)}
-                #masks[mask_name] = mask_img
+                mask_img = mask_img[:,:,:,timepoint]
+
+                cell_num = re.search(r'cell_(\d+)', fname).group(1)
+                masks[mask_name][cell_num] = {
+                    'mask_stack': mask_img,
+                    'timepoint': timepoint,
+                    'cell': cell_num
+                }
     #print(masks)
     for z in range(img.shape[2]):
         #print(f"Loading mask: {fname} for position: {pos} and mask type: {mask_name}, timepoint is {timepoint}, z is {z}, cell number is {re.search(r'cell_(\d+)', fname).group(1)}")
@@ -104,13 +140,14 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
         imgstats = {
             "slice": z + 1,
             "image_name": nospace_name[:idx-7],
-            "timepoint": nospace_name.split('_')[-7].split('t')[-1],
+            "timepoint": int(re.search(r'_t(\d+)', nospace_name).group(1))-1,
             "mask_type": "full",
             "texture_type": nospace_name.split('_')[-6],
-            "position": re.search(r'Pos(\d+)',pos),
+            "position": re.search(r'Pos(\d+)',pos).group(1),
             "distance3d": nospace_name.split('_')[-4],
             "neighbor3d": nospace_name.split('_')[-3],
             "bin_num3d": nospace_name.split('_')[-2],
+            "cell": "full",
             **stats
         }
 
@@ -119,29 +156,28 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
         # -----------------------------------
         # Masked stats
         # -----------------------------------
-        for mask_type, data in masks.items():       #here, make sure to save by cell 
+        for mask_type, cells in masks.items():
+            for cell_num, data in cells.items():
+                current_mask = data["mask_stack"][:, :, z]
+                masked_pixels = currentim[current_mask > 0]
+                stats = compute_stats(masked_pixels)
 
-            current_mask = data["mask_stack"][:, :, z]
+                imgstats = {
+                    "slice": z + 1,
+                    "cell": data["cell"],
+                    "image_name": nospace_name[:idx-7],
+                    "timepoint": data["timepoint"],
+                    "mask_type": mask_type,
+                    "texture_type": nospace_name.split('_')[-6],
+                    "position": re.search(r'Pos(\d+)', pos).group(1),
+                    "distance3d": nospace_name.split('_')[-4],
+                    "neighbor3d": nospace_name.split('_')[-3],
+                    "bin_num3d": nospace_name.split('_')[-2],
+                    **stats
+                }
 
-            masked_pixels = currentim[current_mask > 0]
-
-            stats = compute_stats(masked_pixels)
-            #print("Stats for mask:", mask_name, stats)
-            imgstats = {
-                "slice": z + 1,
-                "cell": data["cell"],
-                "image_name": nospace_name[:idx-7],
-                "timepoint": data["timepoint"],
-                "mask_type": mask_type,
-                "texture_type": nospace_name.split('_')[-6],
-                "position": re.search(r'Pos(\d+)',pos).group(1),
-                "distance3d": nospace_name.split('_')[-4],
-                "neighbor3d": nospace_name.split('_')[-3],
-                "bin_num3d": nospace_name.split('_')[-2],
-                **stats
-            }
-
-            stackstats.append(imgstats)
+                stackstats.append(imgstats)
+            
 
     return stackstats
 
@@ -217,7 +253,7 @@ def collapse_identical_columns(df, groups):
 if __name__ == "__main__":
     dftexture3D = pd.DataFrame()
 
-    for pos in PARAMS["stacks"]:
+    for pos in PARAMS["stacks"]: 
         print(f"Processing position: {pos}")
 
         mask_paths = {
@@ -228,3 +264,32 @@ if __name__ == "__main__":
         dftexture3D = pd.concat([dftexture3D, process_img_folder(pos, str(PATHS["texture3d"]), mask_paths, is_3d=1)], ignore_index=True)
         
     dftexture3D = reshape_texture(dftexture3D)
+
+    groups = find_identical_columns(dftexture3D)
+    if groups:
+        print(f"Found {len(groups)} group(s) of identical columns:")
+        for g in groups:
+            print(" ", g)
+        collapseddf = collapse_identical_columns(dftexture3D, groups)
+        print(collapseddf.columns.values)
+    else:
+        collapseddf = dftexture3D
+        print("No exactly identical columns found.")
+
+
+    if any(col.startswith("n_") for col in collapseddf.columns):
+        collapseddf = collapseddf.rename(columns={col: col.replace(col, "fibercount") for col in collapseddf.columns if col.startswith("n")})
+    if any(col.startswith("z_depth_") for col in collapseddf.columns):
+        collapseddf = collapseddf.rename(columns={col: col.replace(col, "z_depth") for col in collapseddf.columns if col.startswith("z_depth")})
+
+    # Split into position dataframes if any type-like column exists
+    unique_pos = collapseddf['position'].unique()
+    for pos in unique_pos:
+        pos_df = collapseddf[collapseddf['position'] == pos]
+        
+        pos_df.to_csv(f"current_final_dataframe_byslice_pos_{pos}_3Dtrackmate.csv", index=False)
+        
+        print("Saved position dataframes separately")
+
+    # Also save the combined dataframe
+    collapseddf.to_csv("finalcollapsed_dataframe_byslice_trackmate.csv", index=False)
