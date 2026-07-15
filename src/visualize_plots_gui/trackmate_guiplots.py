@@ -1,3 +1,5 @@
+#TODO: fix overlay to cell panel, add contrast sliders, test filename display
+# legend panel fix 
 """
 Collagen 3D Quantification Viewer
 ==================================
@@ -59,6 +61,9 @@ import tifffile as tiff
 import tkinter as tk
 from tkinter import ttk, filedialog
 
+import textwrap
+import json
+
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -72,6 +77,8 @@ TIMEPOINT_REGEX = re.compile(r'_t(\d+)', re.IGNORECASE)
 
 MASK_FOLDER_TEMPLATE = "masks3d_per_cell_{pos}_{radius}um"
 RADII = ["r10", "r20", "r30"]
+
+SETTINGS_FILE = "collagen_viewer_settings.json"
 
 # Keywords used to find the collagen and cell/nuclei channel image files.
 # Matching is case-insensitive substring matching against the filename.
@@ -105,6 +112,7 @@ OVERLAY_ALPHA = 0.45
 # =====================================================================
 # DATA LOADING (dataframes)
 # =====================================================================
+
 
 def get_mask_from_colname(col):
     parts = col.lower().split("_")
@@ -206,9 +214,11 @@ class ImageLibrary:
     and answers lookup questions about where collagen/cell/mask files live
     for a given position/cell."""
 
-    def __init__(self, mask_folder, channel_folder):
+    def __init__(self, mask_folder, channel_folder, user_z, user_t):
         self.mask_folder_root = mask_folder
         self.channel_folder_root = channel_folder
+        self.user_z = user_z
+        self.user_t = user_t
 
         self.mask_files = []
         for root, _, files in os.walk(mask_folder):
@@ -296,16 +306,55 @@ class ImageLibrary:
         return self._cache[path]
 
     def load_channel_stack(self, path):
-        """Returns array shaped (Z, Y, X)."""
+
         def reader(p):
-            arr = tiff.imread(p)
-            arr = np.asarray(arr)
+
+            arr = np.asarray(tiff.imread(p))
             arr = np.squeeze(arr)
+
+            expected_t = self.user_t
+            expected_z = self.user_z
+
             if arr.ndim == 2:
-                arr = arr[np.newaxis, ...]
-            elif arr.ndim > 3:
-                arr = arr.reshape((-1,) + arr.shape[-2:])
+                arr = arr[np.newaxis, np.newaxis, :, :]
+
+            elif arr.ndim == 3:
+
+                # flattened TZ
+                if arr.shape[0] == expected_t * expected_z:
+                    arr = arr.reshape(
+                        expected_t,
+                        expected_z,
+                        arr.shape[1],
+                        arr.shape[2]
+                    )
+
+                # just Z
+                elif arr.shape[0] == expected_z:
+                    arr = arr[np.newaxis, :, :, :]
+
+                else:
+                    raise ValueError(
+                        f"Cannot interpret image shape {arr.shape}"
+                    )
+
+            elif arr.ndim == 4:
+
+                if arr.shape[:2] != (expected_t, expected_z):
+                    print(
+                        "Warning:",
+                        arr.shape,
+                        "doesn't match expected",
+                        (expected_t, expected_z)
+                    )
+
+            else:
+                raise ValueError(
+                    f"Unsupported image shape {arr.shape}"
+                )
+
             return arr
+
         return self._read_cached(path, reader)
 
     def load_mask_stack(self, path):
@@ -370,8 +419,56 @@ class CollagenViewerApp(tk.Tk):
         self.all_cells_var = tk.BooleanVar(value=False)
         self.z_var = tk.IntVar(value=0)
         self.t_var = tk.IntVar(value=0)
+        self.user_z = tk.IntVar(value=46)
+        self.user_t = tk.IntVar(value=25)
 
         self._build_setup_frame()
+
+    def load_settings(self):
+
+        if not os.path.exists(SETTINGS_FILE):
+            return
+
+        with open(SETTINGS_FILE, "r") as f:
+            settings = json.load(f)
+
+        self.mask_folder_var.set(
+            settings.get("mask_folder", "")
+        )
+
+        self.channel_folder_var.set(
+            settings.get("channel_folder", "")
+        )
+
+        self.df_folder_var.set(
+            settings.get("dataframe_folder", "")
+        )
+
+        self.user_z.set(
+            settings.get("z_slices", 46)
+        )
+
+        self.user_t.set(
+            settings.get("timepoints", 26)
+        )
+    def save_settings(self):
+
+        settings = {
+
+            "mask_folder": self.mask_folder_var.get(),
+
+            "channel_folder": self.channel_folder_var.get(),
+
+            "dataframe_folder": self.df_folder_var.get(),
+
+            "z_slices": self.user_z.get(),
+
+            "timepoints": self.user_t.get()
+        }
+
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=4)
+
 
     def _build_setup_frame(self):
         self.setup_frame = ttk.Frame(self, padding=20)
@@ -399,10 +496,30 @@ class CollagenViewerApp(tk.Tk):
         make_row("Dataframe folder:", self.df_folder_var,
                   "Select folder containing the trackmate CSVs")
 
+        zt_frame = ttk.Frame(self.setup_frame)
+        zt_frame.pack(pady=10)
+
+        ttk.Label(zt_frame,text="Z slices").grid(row=0,column=0)
+
+        ttk.Entry(
+            zt_frame,
+            textvariable=self.user_z,
+            width=6
+        ).grid(row=0,column=1,padx=5)
+
+        ttk.Label(zt_frame,text="Time points").grid(row=0,column=2)
+
+        ttk.Entry(
+            zt_frame,
+            textvariable=self.user_t,
+            width=6
+        ).grid(row=0,column=3,padx=5)
+
         ttk.Button(self.setup_frame, text="Load", command=self._load_everything).pack(pady=20)
 
         self.setup_status = ttk.Label(self.setup_frame, text="", foreground="red")
         self.setup_status.pack()
+        self.load_settings()
 
     def _browse_into(self, var, title):
         folder = filedialog.askdirectory(title=title)
@@ -423,7 +540,7 @@ class CollagenViewerApp(tk.Tk):
         if not df_folder or not os.path.isdir(df_folder):
             self.setup_status.config(text="Please choose a valid dataframe folder.")
             return
-
+        self.save_settings()
         try:
             self.grouped_df = build_long_dataframe(df_folder)
         except Exception as e:
@@ -432,7 +549,7 @@ class CollagenViewerApp(tk.Tk):
             return
 
         try:
-            self.image_lib = ImageLibrary(mask_folder, channel_folder)
+            self.image_lib = ImageLibrary(mask_folder, channel_folder, self.user_z.get(), self.user_t.get())
         except Exception as e:
             self.setup_status.config(text=f"Error scanning image folders: {e}")
             traceback.print_exc()
@@ -440,6 +557,7 @@ class CollagenViewerApp(tk.Tk):
 
         self.setup_frame.destroy()
         self._build_main_ui()
+        
 
     def _build_main_ui(self):
         controls = ttk.Frame(self, padding=8)
@@ -593,7 +711,7 @@ class CollagenViewerApp(tk.Tk):
         if sample_path:
             try:
                 stack = self.image_lib.load_channel_stack(sample_path)
-                z_max = stack.shape[0] - 1
+                z_max = stack.shape[1] - 1
             except Exception:
                 pass
         self.z_scale.config(to=max(z_max, 0))
@@ -621,70 +739,289 @@ class CollagenViewerApp(tk.Tk):
         return cells[0] if cells else None
 
     def _refresh_images(self, *_):
+
         if self.image_lib is None:
             return
+
         pos = self.current_pos.get()
         cell = self.primary_cell()
+
         t = int(round(self.t_var.get()))
         z = int(round(self.z_var.get()))
+
         self.t_label.config(text=str(t))
         self.z_label.config(text=str(z))
 
+
+        # Clear previous images/text
         for ax in (self.ax_collagen, self.ax_cell, self.ax_overlay):
             ax.clear()
             ax.axis("off")
-        self.ax_collagen.set_title("Collagen channel", fontsize=10)
-        self.ax_cell.set_title("Cell / nuclei channel", fontsize=10)
-        self.ax_overlay.set_title("Mask overlay (r10/r20/r30)", fontsize=10)
+
+
+        self.ax_collagen.set_title(
+            "Collagen channel",
+            fontsize=10
+        )
+
+        self.ax_cell.set_title(
+            "Cell / nuclei channel",
+            fontsize=10
+        )
+
+        self.ax_overlay.set_title(
+            "Mask overlay (r10/r20/r30)",
+            fontsize=10
+        )
+
 
         collagen_slice = None
-        try:
-            path = self.image_lib.find_channel_file("collagen", pos, t)
-            if path:
-                stack = self.image_lib.load_channel_stack(path)
-                z_clamped = min(z, stack.shape[0] - 1)
-                collagen_slice = stack[z_clamped]
-                self.ax_collagen.imshow(normalize_for_display(collagen_slice), cmap="gray")
-            else:
-                self.ax_collagen.text(0.5, 0.5, "collagen image not found\n(sub7000)",
-                                       ha="center", va="center", fontsize=9, wrap=True)
-        except Exception as e:
-            self.ax_collagen.text(0.5, 0.5, f"error:\n{e}", ha="center", va="center", fontsize=8)
+
+
+        # -----------------------------
+        # COLLAGEN IMAGE
+        # -----------------------------
 
         try:
-            path = self.image_lib.find_channel_file("cell", pos, t)
-            if path:
-                stack = self.image_lib.load_channel_stack(path)
-                z_clamped = min(z, stack.shape[0] - 1)
-                self.ax_cell.imshow(normalize_for_display(stack[z_clamped]), cmap="gray")
+
+            collagen_path = self.image_lib.find_channel_file(
+                "collagen",
+                pos,
+                t
+            )
+
+            if collagen_path:
+
+                stack = self.image_lib.load_channel_stack(collagen_path)
+
+                t_clamped = min(t, stack.shape[0]-1)
+                z_clamped = min(z, stack.shape[1]-1)
+
+                collagen_slice = stack[
+                    t_clamped,
+                    z_clamped
+                ]
+
+                self.ax_collagen.imshow(
+                    normalize_for_display(collagen_slice),
+                    cmap="gray"
+                )
+
+                filename = os.path.basename(collagen_path)
+
+                wrapped = "\n".join(
+                    textwrap.wrap(
+                        filename,
+                        width=50
+                    )
+                )
+
+                self.ax_collagen.text(
+                    0.5,
+                    -0.08,
+                    wrapped,
+                    transform=self.ax_collagen.transAxes,
+                    ha="center",
+                    va="top",
+                    fontsize=7,
+                    clip_on=False
+                )
+
+
             else:
-                self.ax_cell.text(0.5, 0.5, "cell channel image not found\n(c1)",
-                                   ha="center", va="center", fontsize=9, wrap=True)
+
+                self.ax_collagen.text(
+                    0.5,
+                    0.5,
+                    "collagen image not found\n(sub7000)",
+                    transform=self.ax_collagen.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9
+                )
+
+
         except Exception as e:
-            self.ax_cell.text(0.5, 0.5, f"error:\n{e}", ha="center", va="center", fontsize=8)
+
+            self.ax_collagen.text(
+                0.5,
+                0.5,
+                f"error:\n{e}",
+                transform=self.ax_collagen.transAxes,
+                ha="center",
+                va="center",
+                fontsize=8
+            )
+
+
+
+        # -----------------------------
+        # CELL IMAGE
+        # -----------------------------
 
         try:
+
+            cell_path = self.image_lib.find_channel_file(
+                "cell",
+                pos,
+                t
+            )
+
+            if cell_path:
+
+                stack = self.image_lib.load_channel_stack(cell_path)
+
+                t_clamped = min(t, stack.shape[0]-1)
+                z_clamped = min(z, stack.shape[1]-1)
+
+                self.ax_cell.imshow(
+                    normalize_for_display(
+                        stack[t_clamped, z_clamped]
+                    ),
+                    cmap="gray"
+                )
+
+                filename = os.path.basename(cell_path)
+
+                wrapped = "\n".join(
+                    textwrap.wrap(
+                        filename,
+                        width=50
+                    )
+                )
+
+                self.ax_cell.text(
+                    0.5,
+                    -0.08,
+                    wrapped,
+                    transform=self.ax_cell.transAxes,
+                    ha="center",
+                    va="top",
+                    fontsize=7,
+                    clip_on=False
+                )
+
+
+            else:
+
+                self.ax_cell.text(
+                    0.5,
+                    0.5,
+                    "cell channel image not found\n(c1)",
+                    transform=self.ax_cell.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9
+                )
+
+
+        except Exception as e:
+
+            self.ax_cell.text(
+                0.5,
+                0.5,
+                f"error:\n{e}",
+                transform=self.ax_cell.transAxes,
+                ha="center",
+                va="center",
+                fontsize=8
+            )
+
+
+
+        # -----------------------------
+        # MASK OVERLAY
+        # -----------------------------
+
+        try:
+
             if cell is not None:
+
                 masks_2d = {}
+
                 for radius in RADII:
-                    mpath = self.image_lib.find_mask_file(pos, radius, cell)
+
+                    mpath = self.image_lib.find_mask_file(
+                        pos,
+                        radius,
+                        cell
+                    )
+
                     if not mpath:
                         continue
+
+
                     mstack = self.image_lib.load_mask_stack(mpath)
-                    t_clamped = min(t, mstack.shape[0] - 1)
-                    z_clamped = min(z, mstack.shape[1] - 1)
-                    masks_2d[radius] = mstack[t_clamped, z_clamped]
+
+                    t_clamped = min(
+                        t,
+                        mstack.shape[0]-1
+                    )
+
+                    z_clamped = min(
+                        z,
+                        mstack.shape[1]-1
+                    )
+
+                    masks_2d[radius] = mstack[
+                        t_clamped,
+                        z_clamped
+                    ]
+
+
                 if masks_2d:
-                    bg = collagen_slice if collagen_slice is not None else next(iter(masks_2d.values()))
-                    overlay = build_overlay_rgb(bg, masks_2d)
+
+                    bg = (
+                        collagen_slice
+                        if collagen_slice is not None
+                        else next(iter(masks_2d.values()))
+                    )
+
+                    overlay = build_overlay_rgb(
+                        bg,
+                        masks_2d
+                    )
+
                     self.ax_overlay.imshow(overlay)
+
+
                 else:
-                    self.ax_overlay.text(0.5, 0.5, "no masks found for this cell",
-                                          ha="center", va="center", fontsize=9, wrap=True)
+
+                    self.ax_overlay.text(
+                        0.5,
+                        0.5,
+                        "no masks found for this cell",
+                        transform=self.ax_overlay.transAxes,
+                        ha="center",
+                        va="center",
+                        fontsize=9
+                    )
+
+
             else:
-                self.ax_overlay.text(0.5, 0.5, "select a cell", ha="center", va="center")
+
+                self.ax_overlay.text(
+                    0.5,
+                    0.5,
+                    "select a cell",
+                    transform=self.ax_overlay.transAxes,
+                    ha="center",
+                    va="center"
+                )
+
+
         except Exception as e:
-            self.ax_overlay.text(0.5, 0.5, f"error:\n{e}", ha="center", va="center", fontsize=8)
+
+            self.ax_overlay.text(
+                0.5,
+                0.5,
+                f"error:\n{e}",
+                transform=self.ax_overlay.transAxes,
+                ha="center",
+                va="center",
+                fontsize=8
+            )
+
 
         self.canvas_images.draw_idle()
 
