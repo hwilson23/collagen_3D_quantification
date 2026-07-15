@@ -632,10 +632,20 @@ class CollagenViewerApp(tk.Tk):
         plot_panel = ttk.Frame(self, padding=8)
         plot_panel.pack(fill="both", expand=True)
 
-        self.fig_plots = Figure(figsize=(13, 4), dpi=100)
-        self.ax_r10 = self.fig_plots.add_subplot(1, 3, 1)
-        self.ax_r20 = self.fig_plots.add_subplot(1, 3, 2)
-        self.ax_r30 = self.fig_plots.add_subplot(1, 3, 3)
+        self.fig_plots = Figure(figsize=(15, 4), dpi=100)
+
+        self.ax_r10 = self.fig_plots.add_subplot(1, 4, 1)
+        self.ax_r20 = self.fig_plots.add_subplot(1, 4, 2)
+        self.ax_r30 = self.fig_plots.add_subplot(1, 4, 3)
+
+        # dedicated legend panel
+        self.ax_legend = self.fig_plots.add_subplot(1, 4, 4)
+
+        self.ax_legend.axis("off")
+        self.ax_legend.set_title(
+            "Cells",
+            fontsize=10
+        )
         self.canvas_plots = FigureCanvasTkAgg(self.fig_plots, master=plot_panel)
         self.canvas_plots.get_tk_widget().pack(fill="both", expand=True)
 
@@ -812,7 +822,7 @@ class CollagenViewerApp(tk.Tk):
                 wrapped = "\n".join(
                     textwrap.wrap(
                         filename,
-                        width=50
+                        width=70
                     )
                 )
 
@@ -886,7 +896,7 @@ class CollagenViewerApp(tk.Tk):
                 wrapped = "\n".join(
                     textwrap.wrap(
                         filename,
-                        width=50
+                        width=70
                     )
                 )
 
@@ -1032,8 +1042,13 @@ class CollagenViewerApp(tk.Tk):
         pos_num = re.search(r'\d+', pos).group() if re.search(r'\d+', pos) else pos
         feature = self.current_feature.get()
         cells = self.selected_cells()
+        print("feature:", feature)
+        print("cells:", cells)
+        print("rows:", len(self.grouped_df))
 
         axes = {"r10": self.ax_r10, "r20": self.ax_r20, "r30": self.ax_r30}
+        legend_handles = []
+        legend_labels = []
         for radius, ax in axes.items():
             ax.clear()
             ax.set_title(f"{feature or ''}  ({radius})", fontsize=10)
@@ -1051,21 +1066,60 @@ class CollagenViewerApp(tk.Tk):
         ]
 
         for radius, ax in axes.items():
+
             rsub = sub[sub["mask_type"] == radius]
-            plotted_any = False
+
             for cell in cells:
-                csub = rsub[rsub["cell"].astype(str) == str(cell)].sort_values("timepoint")
+
+                csub = rsub[
+                    rsub["cell"].astype(str) == str(cell)
+                ].sort_values("timepoint")
+
                 if csub.empty:
                     continue
-                ax.plot(csub["timepoint"], csub["value"], marker="o", label=f"cell {cell}")
-                plotted_any = True
-            if plotted_any and len(cells) <= 15:
-                ax.legend(fontsize=7)
-            elif not plotted_any:
-                ax.text(0.5, 0.5, "no data", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=9)
 
-        self.fig_plots.tight_layout()
+                line, = ax.plot(
+                    csub["timepoint"],
+                    csub["value"],
+                    marker="o",
+                    label=f"cell {cell}"
+                )
+
+                # Add each cell only once to legend
+                if f"cell {cell}" not in legend_labels:
+                    legend_handles.append(line)
+                    legend_labels.append(f"cell {cell}")
+                                
+
+            self.fig_plots.subplots_adjust(
+                left=0.05,
+                right=0.98,
+                top=0.90,
+                bottom=0.15,
+                wspace=0.35
+            )
+            self.ax_legend.clear()
+            self.ax_legend.axis("off")
+
+            if legend_handles:
+
+                self.ax_legend.legend(
+                    legend_handles,
+                    legend_labels,
+                    loc="upper left",
+                    fontsize=8,
+                    frameon=False
+                )
+
+            else:
+
+                self.ax_legend.text(
+                    0.5,
+                    0.5,
+                    "No cells",
+                    ha="center",
+                    va="center"
+                )
         self.canvas_plots.draw_idle()
 
 
