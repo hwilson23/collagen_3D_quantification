@@ -1,5 +1,5 @@
 #TODO: fix overlay to cell panel, add contrast sliders, test filename display
-# legend panel fix 
+
 """
 Collagen 3D Quantification Viewer
 ==================================
@@ -616,14 +616,26 @@ class CollagenViewerApp(tk.Tk):
         image_panel = ttk.Frame(self, padding=8)
         image_panel.pack(fill="x")
 
-        self.fig_images = Figure(figsize=(13, 4), dpi=100)
-        self.ax_collagen = self.fig_images.add_subplot(1, 3, 1)
-        self.ax_cell = self.fig_images.add_subplot(1, 3, 2)
-        self.ax_overlay = self.fig_images.add_subplot(1, 3, 3)
+        self.fig_images = Figure(figsize=(16, 4), dpi=100)
+
+        self.ax_collagen = self.fig_images.add_subplot(1, 4, 1)
+        self.ax_cell = self.fig_images.add_subplot(1, 4, 2)
+        self.ax_overlay = self.fig_images.add_subplot(1, 4, 3)
+        self.ax_cell_overlay = self.fig_images.add_subplot(1, 4, 4)
         for ax, title in zip(
-            [self.ax_collagen, self.ax_cell, self.ax_overlay],
-            ["Collagen channel", "Cell / nuclei channel", "Mask overlay (r10/r20/r30)"],
-        ):
+            [
+                self.ax_collagen,
+                self.ax_cell,
+                self.ax_overlay,
+                self.ax_cell_overlay
+            ],
+            [
+                "Collagen channel",
+                "Cell / nuclei channel",
+                "Mask overlay on collagen",
+                "Mask overlay on cell"
+            ],
+        ): 
             ax.set_title(title, fontsize=10)
             ax.axis("off")
         self.canvas_images = FigureCanvasTkAgg(self.fig_images, master=image_panel)
@@ -764,7 +776,8 @@ class CollagenViewerApp(tk.Tk):
 
 
         # Clear previous images/text
-        for ax in (self.ax_collagen, self.ax_cell, self.ax_overlay):
+        for ax in (self.ax_collagen, self.ax_cell, self.ax_overlay, self.ax_cell_overlay
+        ):
             ax.clear()
             ax.axis("off")
 
@@ -783,7 +796,10 @@ class CollagenViewerApp(tk.Tk):
             "Mask overlay (r10/r20/r30)",
             fontsize=10
         )
-
+        self.ax_cell_overlay.set_title(
+            "Mask overlay on cell",
+             fontsize=10
+        )
 
         collagen_slice = None
 
@@ -884,10 +900,10 @@ class CollagenViewerApp(tk.Tk):
                 t_clamped = min(t, stack.shape[0]-1)
                 z_clamped = min(z, stack.shape[1]-1)
 
+                cell_slice = stack[t_clamped, z_clamped]
+
                 self.ax_cell.imshow(
-                    normalize_for_display(
-                        stack[t_clamped, z_clamped]
-                    ),
+                    normalize_for_display(cell_slice),
                     cmap="gray"
                 )
 
@@ -981,31 +997,42 @@ class CollagenViewerApp(tk.Tk):
 
                 if masks_2d:
 
-                    bg = (
-                        collagen_slice
-                        if collagen_slice is not None
-                        else next(iter(masks_2d.values()))
-                    )
+                    if collagen_slice is not None:
+                        overlay = build_overlay_rgb(
+                            collagen_slice,
+                            masks_2d
+                        )
 
-                    overlay = build_overlay_rgb(
-                        bg,
+                        self.ax_overlay.imshow(overlay)
+
+
+                # overlay on cell image
+                if 'cell_slice' in locals():
+
+                    cell_overlay = build_overlay_rgb(
+                        cell_slice,
                         masks_2d
                     )
 
-                    self.ax_overlay.imshow(overlay)
+                    self.ax_cell_overlay.imshow(
+                        cell_overlay
+                    )
 
 
                 else:
 
-                    self.ax_overlay.text(
-                        0.5,
-                        0.5,
-                        "no masks found for this cell",
-                        transform=self.ax_overlay.transAxes,
-                        ha="center",
-                        va="center",
-                        fontsize=9
-                    )
+                    for ax in (
+                        self.ax_overlay,
+                        self.ax_cell_overlay
+                    ):
+                        ax.text(
+                            0.5,
+                            0.5,
+                            "no masks found for this cell",
+                            ha="center",
+                            va="center",
+                            fontsize=9
+                        )
 
 
             else:
@@ -1092,11 +1119,10 @@ class CollagenViewerApp(tk.Tk):
                                 
 
             self.fig_plots.subplots_adjust(
-                left=0.05,
+                left=0.02,
                 right=0.98,
-                top=0.90,
                 bottom=0.15,
-                wspace=0.35
+                wspace=0.25
             )
             self.ax_legend.clear()
             self.ax_legend.axis("off")
