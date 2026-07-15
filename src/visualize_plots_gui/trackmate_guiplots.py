@@ -1,4 +1,3 @@
-#TODO: fix overlay to cell panel, add contrast sliders, test filename display
 
 """
 Collagen 3D Quantification Viewer
@@ -384,8 +383,8 @@ def normalize_for_display(img2d, p_low=2, p_high=98):
     return out
 
 
-def build_overlay_rgb(background2d, masks_by_radius):
-    bg = normalize_for_display(background2d)
+def build_overlay_rgb(background2d, masks_by_radius, p_low=2, p_high=98):
+    bg = normalize_for_display(background2d, p_low, p_high)
     rgb = np.stack([bg, bg, bg], axis=-1)
     for radius in ["r30", "r20", "r10"]:
         mask = masks_by_radius.get(radius)
@@ -421,6 +420,13 @@ class CollagenViewerApp(tk.Tk):
         self.t_var = tk.IntVar(value=0)
         self.user_z = tk.IntVar(value=46)
         self.user_t = tk.IntVar(value=25)
+        self.contrast_values = {
+            "collagen": {"low": 2.0, "high": 98.0},
+            "cell": {"low": 2.0, "high": 98.0},
+        }
+        self.contrast_channel_var = tk.StringVar(value="Collagen")
+        self.contrast_low_var = tk.DoubleVar(value=2.0)
+        self.contrast_high_var = tk.DoubleVar(value=98.0)
 
         self._build_setup_frame()
 
@@ -613,6 +619,39 @@ class CollagenViewerApp(tk.Tk):
         self.z_label = ttk.Label(slider_frame, text="0")
         self.z_label.pack(side="left")
 
+        contrast_frame = ttk.Frame(self, padding=(8, 4))
+        contrast_frame.pack(fill="x")
+        ttk.Label(contrast_frame, text="Adjust contrast for:").pack(side="left")
+        self.contrast_channel_combo = ttk.Combobox(
+            contrast_frame, textvariable=self.contrast_channel_var,
+            state="readonly", width=10, values=["Collagen", "Cell"],
+        )
+        self.contrast_channel_combo.pack(side="left", padx=(5, 15))
+        self.contrast_channel_combo.bind(
+            "<<ComboboxSelected>>", lambda e: self._on_contrast_channel_change()
+        )
+
+        ttk.Label(contrast_frame, text="Low %:").pack(side="left")
+        self.contrast_low_scale = ttk.Scale(
+            contrast_frame, from_=0, to=100, orient="horizontal",
+            variable=self.contrast_low_var, command=lambda v: self._on_contrast_slider_change(),
+        )
+        self.contrast_low_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.contrast_low_label = ttk.Label(contrast_frame, text="2", width=4)
+        self.contrast_low_label.pack(side="left", padx=(0, 20))
+
+        ttk.Label(contrast_frame, text="High %:").pack(side="left")
+        self.contrast_high_scale = ttk.Scale(
+            contrast_frame, from_=0, to=100, orient="horizontal",
+            variable=self.contrast_high_var, command=lambda v: self._on_contrast_slider_change(),
+        )
+        self.contrast_high_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.contrast_high_label = ttk.Label(contrast_frame, text="98", width=4)
+        self.contrast_high_label.pack(side="left", padx=(0, 10))
+
+        ttk.Button(contrast_frame, text="Reset this channel",
+                   command=self._reset_contrast).pack(side="left")
+
         image_panel = ttk.Frame(self, padding=8)
         image_panel.pack(fill="x")
 
@@ -638,6 +677,9 @@ class CollagenViewerApp(tk.Tk):
         ): 
             ax.set_title(title, fontsize=10)
             ax.axis("off")
+        self.fig_images.subplots_adjust(
+            left=0.03, right=0.97, top=0.85, bottom=0.22, wspace=0.25
+        )
         self.canvas_images = FigureCanvasTkAgg(self.fig_images, master=image_panel)
         self.canvas_images.get_tk_widget().pack(fill="both", expand=True)
 
@@ -675,6 +717,34 @@ class CollagenViewerApp(tk.Tk):
         self.grouped_df = None
         self.image_lib = None
         self._build_setup_frame()
+
+    def _active_contrast_channel(self):
+        return "collagen" if self.contrast_channel_var.get() == "Collagen" else "cell"
+
+    def _on_contrast_channel_change(self):
+        """Dropdown switched -- load that channel's stored low/high onto
+        the sliders (without touching the other channel's values)."""
+        ch = self._active_contrast_channel()
+        vals = self.contrast_values[ch]
+        self.contrast_low_var.set(vals["low"])
+        self.contrast_high_var.set(vals["high"])
+        self._refresh_images()
+
+    def _on_contrast_slider_change(self):
+        """Slider moved -- save into whichever channel is currently
+        selected in the dropdown, then redraw."""
+        ch = self._active_contrast_channel()
+        self.contrast_values[ch]["low"] = self.contrast_low_var.get()
+        self.contrast_values[ch]["high"] = self.contrast_high_var.get()
+        self._refresh_images()
+
+    def _reset_contrast(self):
+        ch = self._active_contrast_channel()
+        self.contrast_values[ch]["low"] = 2.0
+        self.contrast_values[ch]["high"] = 98.0
+        self.contrast_low_var.set(2.0)
+        self.contrast_high_var.set(98.0)
+        self._refresh_images()
 
     def _populate_positions(self):
         df_positions = set(self.grouped_df["position"].unique()) if "position" in self.grouped_df else set()
@@ -774,6 +844,25 @@ class CollagenViewerApp(tk.Tk):
         self.t_label.config(text=str(t))
         self.z_label.config(text=str(z))
 
+        # Independent contrast per channel. The sliders currently show
+        # (and edit) whichever channel is selected in the dropdown; both
+        # channels' stored values are always used for their own image.
+        collagen_low, collagen_high = (self.contrast_values["collagen"]["low"],
+                                        self.contrast_values["collagen"]["high"])
+        cell_low, cell_high = (self.contrast_values["cell"]["low"],
+                                self.contrast_values["cell"]["high"])
+        if collagen_high <= collagen_low:
+            collagen_high = collagen_low + 1
+        if cell_high <= cell_low:
+            cell_high = cell_low + 1
+
+        active_ch = self._active_contrast_channel()
+        active_low, active_high = (
+            (collagen_low, collagen_high) if active_ch == "collagen" else (cell_low, cell_high)
+        )
+        self.contrast_low_label.config(text=f"{active_low:.0f}")
+        self.contrast_high_label.config(text=f"{active_high:.0f}")
+
 
         # Clear previous images/text
         for ax in (self.ax_collagen, self.ax_cell, self.ax_overlay, self.ax_cell_overlay
@@ -829,7 +918,7 @@ class CollagenViewerApp(tk.Tk):
                 ]
 
                 self.ax_collagen.imshow(
-                    normalize_for_display(collagen_slice),
+                    normalize_for_display(collagen_slice, collagen_low, collagen_high),
                     cmap="gray"
                 )
 
@@ -838,13 +927,15 @@ class CollagenViewerApp(tk.Tk):
                 wrapped = "\n".join(
                     textwrap.wrap(
                         filename,
-                        width=70
+                        width=40,
+                        break_long_words=True,
+                        break_on_hyphens=True,
                     )
                 )
 
                 self.ax_collagen.text(
                     0.5,
-                    -0.08,
+                    -0.06,
                     wrapped,
                     transform=self.ax_collagen.transAxes,
                     ha="center",
@@ -903,7 +994,7 @@ class CollagenViewerApp(tk.Tk):
                 cell_slice = stack[t_clamped, z_clamped]
 
                 self.ax_cell.imshow(
-                    normalize_for_display(cell_slice),
+                    normalize_for_display(cell_slice, cell_low, cell_high),
                     cmap="gray"
                 )
 
@@ -912,13 +1003,15 @@ class CollagenViewerApp(tk.Tk):
                 wrapped = "\n".join(
                     textwrap.wrap(
                         filename,
-                        width=70
+                        width=40,
+                        break_long_words=True,
+                        break_on_hyphens=True,
                     )
                 )
 
                 self.ax_cell.text(
                     0.5,
-                    -0.08,
+                    -0.06,
                     wrapped,
                     transform=self.ax_cell.transAxes,
                     ha="center",
@@ -1000,7 +1093,9 @@ class CollagenViewerApp(tk.Tk):
                     if collagen_slice is not None:
                         overlay = build_overlay_rgb(
                             collagen_slice,
-                            masks_2d
+                            masks_2d,
+                            collagen_low,
+                            collagen_high
                         )
 
                         self.ax_overlay.imshow(overlay)
@@ -1011,7 +1106,9 @@ class CollagenViewerApp(tk.Tk):
 
                     cell_overlay = build_overlay_rgb(
                         cell_slice,
-                        masks_2d
+                        masks_2d,
+                        cell_low,
+                        cell_high
                     )
 
                     self.ax_cell_overlay.imshow(
