@@ -105,3 +105,14 @@ Uses `scyjava` for ImageJ interop.
 | `parse_into_dataframe_NOslices.py` | Aggregate all outputs as stack summary |
 | `fanalyze_dataframe.ipynb` | Exploratory plots on exported `.csv` |
 | `RF_regression.py` | Random forest regressor to separate conditions and rank feature importance |
+
+
+## Step 8 - GUI visualization of trackmate data
+
+- Running nuclei/cell channel through trackmate in Fiji, export spots csv
+- using trackmatecsv_3dmask.py, creates exported mask images tracked over time
+    - define masks as spherical volumes around the center point and save individual z stack images
+    - z placement of sphere is determined from the mask project of a disk centered on the cell
+- trackmate_3dglcm_dataframe.py creates positional dataframes with the masks applied (similar to YESslices script)
+-  trackmate_analyze_dataframe_withmasks.ipynb is notebook to test plotting
+-  the positional dataframes outputted in the trackmate format can be read and vizualized in the gui
