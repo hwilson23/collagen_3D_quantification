@@ -16,17 +16,22 @@ from sklearn.mixture import GaussianMixture
 # PARAMETERS — edit these
 # =============================================================================
 
-csv_path          = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis\AVG_C2-flucol594_bkokpcwhoescht_Pos6_spots.csv"
-image_path        = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_hoescht_col_channels\C2-flucol594_bkokpcwhoescht_800nm_blank_44530_37010_blank_g558555...scht_800nm_blank_44530_37010_blank_g558555_poc0_1_MMStack_Pos6.tif"
-out_dir           = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis\trackmatemasks"
-
+#csv_path          = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis\AVG_C2-flucol594_bkokpcwhoescht_Pos6_spots.csv"
+#image_path        = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_hoescht_col_channels\C2-flucol594_bkokpcwhoescht_800nm_blank_44530_37010_blank_g558555...scht_800nm_blank_44530_37010_blank_g558555_poc0_1_MMStack_Pos6.tif"
+#out_dir           = r"G:\FluorescentCollagen\20260519_flucol_kpc_ows3\20260519_stained_analysis\trackmatemasks"
+csv_path = r"G:\UTSW_BJChang\SUM_Cell7_bksub_spots.csv"
+image_path = r"G:\UTSW_BJChang\Cell7_bksub_CH00.tif"
+out_dir = r"G:\UTSW_BJChang\bksub_trackmatemasks"
 
 pos_match = re.search(r'Pos(\d+)', csv_path)
 pos_tag   = f"Pos{pos_match.group(1)}" if pos_match else ""
 
-xy_pixel_um       = 0.276   # microns per XY pixel
-z_step_um         = 2.0     # microns per Z slice
-sphere_radii  = [10.0, 20.0, 30.0]  # sphere radius in microns (isotropic in physical space)
+#xy_pixel_um       = 0.276   # microns per XY pixel
+xy_pixel_um = 1 #.104
+#z_step_um         = 2.0     # microns per Z slice
+z_step_um = 1 #0.3
+#sphere_radii  = [10.0, 20.0, 30.0]  # sphere radius in microns (isotropic in physical space)
+sphere_radii = [200,250,350]
 z_profile_disk_px = 10      # XY disk radius (pixels) used to compute Z intensity profile
 
 # Boundary behaviour toggle:

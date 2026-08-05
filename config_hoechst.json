@@ -1,9 +1,9 @@
 {
   "_comment": "Single source of truth for all paths and parameters. Edit here — Python and MATLAB both read this file.",
 
-  "data_root": "G:/UTSW_BJChang",
-  "experiment": "",
-  "experiment_endpoint": "",
+  "data_root": "G:/FluorescentCollagen",
+  "experiment": "20260519_flucol_kpc_ows3",
+  "experiment_endpoint": "20260427_flucol_ows3",
 
   "external": {
     "twombli_csv":    "",
@@ -12,7 +12,7 @@
 
   "params": {
     "z_step":     2.0,
-    "stacks":     [""],
+    "stacks":     ["Pos0", "Pos1", "Pos2", "Pos4", "Pos5", "Pos6"],
     "min_fibers": 30
   },
 
@@ -21,8 +21,8 @@
     "folder_ep":   "",
     "outpath_ep":  "",
     "outpath_TOP": "",
-    "folder_ts":   "G:/UTSW_BJChang/Cell7_bksub",
-    "outpath_ts":  "G:/UTSW_BJChang/output_bksub_texture3D",
+    "folder_ts":   "G:/FluorescentCollagen/20260519_flucol_kpc_ows3/20260519_hoescht_col_channels/maskapplied_timeseries_stacks",
+    "outpath_ts":  "G:/FluorescentCollagen/20260519_flucol_kpc_ows3/20260519_stained_analysis/output_bksub_texture3D",
     "folder_gpu":  "",
     "outpath_gpu": "",
 
@@ -33,8 +33,8 @@
                          "energ","entro","homom","homop","maxpr","sosvh","savgh",
                          "svarh","senth","dvarh","denth","inf1h","inf2h","indnc","idmnc"],
 
-    "num_timepoints": 51,
-    "num_z_slices":   168,
-    "num_quadrants":  8
+    "num_timepoints": 25,
+    "num_z_slices":   46,
+    "num_quadrants":  4
   }
 }

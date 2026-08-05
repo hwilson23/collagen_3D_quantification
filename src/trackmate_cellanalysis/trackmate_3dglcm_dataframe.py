@@ -106,7 +106,9 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
     
 
     idx = nospace_name.find("3D")
-    timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
+    
+    #timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
+    timepoint= int(re.search(r'CH00_(\d+)', nospace_name).group(1))-1
 
     # Load masks
     # Load masks
@@ -120,7 +122,10 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
                 mask_img = np.transpose(mask_img,(2,3,1,0))
                 mask_img = mask_img[:,:,:,timepoint]
 
-                cell_num = re.search(r'cell_(\d+)', fname).group(1)
+                if re.search(r'cell_(\d+)', fname) is not None:
+                    cell_num = re.search(r'cell_(\d+)', fname).group(1)
+                else: 
+                    cell_num = ""
                 masks[mask_name][cell_num] = {
                     'mask_stack': mask_img,
                     'timepoint': timepoint,
@@ -140,10 +145,11 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
         imgstats = {
             "slice": z + 1,
             "image_name": nospace_name[:idx-7],
-            "timepoint": int(re.search(r'_t(\d+)', nospace_name).group(1))-1,
+            #"timepoint": int(re.search(r'_t(\d+)', nospace_name).group(1))-1,
+            timepoint: int(re.search(r'CH00_(\d+)', nospace_name).group(1))-1,
             "mask_type": "full",
             "texture_type": nospace_name.split('_')[-6],
-            "position": re.search(r'Pos(\d+)',pos).group(1),
+            #"position": re.search(r'Pos(\d+)',pos).group(1),
             "distance3d": nospace_name.split('_')[-4],
             "neighbor3d": nospace_name.split('_')[-3],
             "bin_num3d": nospace_name.split('_')[-2],
@@ -162,6 +168,10 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
                 masked_pixels = currentim[current_mask > 0]
                 stats = compute_stats(masked_pixels)
 
+                if re.search(r'Pos(\d+)', pos) is not None:
+                    positiontag = re.search(r'Pos(\d+)', pos).group(1)
+                else:
+                    positiontag = ""
                 imgstats = {
                     "slice": z + 1,
                     "cell": data["cell"],
@@ -169,7 +179,7 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
                     "timepoint": data["timepoint"],
                     "mask_type": mask_type,
                     "texture_type": nospace_name.split('_')[-6],
-                    "position": re.search(r'Pos(\d+)', pos).group(1),
+                    "position": positiontag,
                     "distance3d": nospace_name.split('_')[-4],
                     "neighbor3d": nospace_name.split('_')[-3],
                     "bin_num3d": nospace_name.split('_')[-2],
@@ -257,9 +267,12 @@ if __name__ == "__main__":
         print(f"Processing position: {pos}")
 
         mask_paths = {
-            "r20":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r20um"),
-            "r30":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r30um"),
-            "r10": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r10um"),
+            #"r20":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r20um"),
+            #"r30":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r30um"),
+            #"r10": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r10um"),
+            "r200": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r200um"),
+            "r250": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r250um"),
+            "r350": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r350um"),
         }
         dftexture3D = pd.concat([dftexture3D, process_img_folder(pos, str(PATHS["texture3d"]), mask_paths, is_3d=1)], ignore_index=True)
         

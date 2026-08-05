@@ -16,7 +16,7 @@ DATA_ROOT  = Path(_cfg["data_root"])
 EXPERIMENT = _cfg["experiment"]
 
 _base = DATA_ROOT / EXPERIMENT
-_sel  = _base / "20260519_stained_analysis"
+_sel  = _base / ""
 _base_ep = DATA_ROOT / _cfg["experiment_endpoint"]
 
 PATHS = {

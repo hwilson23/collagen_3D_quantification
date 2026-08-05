@@ -1,4 +1,3 @@
-
 """
 Collagen 3D Quantification Viewer
 ==================================
@@ -8,37 +7,14 @@ raw microscopy images they were computed from.
 
 WHAT IT DOES
 ------------
-1. Asks you to pick THREE folders:
-     - Mask folder: the parent folder containing your
-       "masks3d_per_cell_{pos}_{radius}um" subfolders.
-     - Raw channel image folder: where your c1 (cell/nuclei) and sub7000
-       (collagen) TIFFs live. Can be a completely different folder tree
-       than the mask folder.
-     - Dataframe folder: where your "current_final_dataframe_byslice_pos*
-       trackmate*.csv" files live.
-2. Loads every matching CSV in the dataframe folder and reduces it to one
-   row per (position, timepoint, mask_type, cell, feature) -- the mean over
-   z-slices -- exactly like your existing aggregation script does.
-3. Populates dropdowns for Position, Cell (multi-select), and Feature based
-   on what's actually present in the data / image folders.
-4. Shows three images side-by-side for the selected position/cell/timepoint/
-   z-slice: the collagen channel, the cell/nuclei channel, and a color-coded
-   overlay of the r10/r20/r30 masks on top of the collagen channel.
-5. Shows three line plots (one per radius: r10, r20, r30) of the selected
-   texture feature vs. timepoint, with one line per selected cell. Checking
-   "All cells" plots every cell found for that position.
-
-FILE-NAMING ASSUMPTIONS (edit the CONFIG block below if these don't match)
-----------------------------------------------------------------------------
-  - Collagen channel files: contain "sub7000" in the filename, one file per
-    (position, timepoint), TIFF shape (Z, Y, X).
-  - Cell/nuclei channel files: contain "c1" in the filename, same shape
-    convention as collagen.
-  - Mask volumes: one file per (position, radius, cell), TIFF shape
-    (T, Z, Y, X) -- matches the np.transpose(mask_img, (2,3,1,0)) used in
-    your combining script, which turns (T,Z,Y,X) into (Y,X,Z,T).
-  - Mask subfolder naming: "masks3d_per_cell_{pos}_{radius}um"
-    (radius in {r10, r20, r30}).
+1. Asks you to pick THREE folders (mask folder, raw channel folder,
+   dataframe folder) plus matching keywords (collagen channel, cell channel,
+   position, radii). All of these are editable on the loading screen and saved
+   to collagen_viewer_settings.json.
+2. Handles positionless datasets, 1-indexed / 0-indexed timepoints, and padded
+   cell IDs (e.g. cell_0000 vs cell 0) seamlessly.
+3. Renders 2D slices across Z and T for raw channel stacks and cell mask overlays.
+4. Plots feature values over time for selected cells and radii.
 
 REQUIREMENTS
 ------------
@@ -52,6 +28,9 @@ RUN
 import os
 import re
 import traceback
+import threading
+import queue
+import json
 
 import numpy as np
 import pandas as pd
@@ -59,9 +38,7 @@ import tifffile as tiff
 
 import tkinter as tk
 from tkinter import ttk, filedialog
-
-import textwrap
-import json
+from collections import defaultdict
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -70,22 +47,18 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # CONFIG -- edit these to match your actual file-naming conventions
 # =====================================================================
 
-POS_REGEX = re.compile(r'Pos(\d+)', re.IGNORECASE)
+DEFAULT_POSITION_KEYWORDS = ["Pos"]
+DEFAULT_RADII = ["r10", "r20", "r30"]
 CELL_REGEX = re.compile(r'cell_(\d+)', re.IGNORECASE)
-TIMEPOINT_REGEX = re.compile(r'_t(\d+)', re.IGNORECASE)
 
 MASK_FOLDER_TEMPLATE = "masks3d_per_cell_{pos}_{radius}um"
-RADII = ["r10", "r20", "r30"]
 
 SETTINGS_FILE = "collagen_viewer_settings.json"
 
-# Keywords used to find the collagen and cell/nuclei channel image files.
-# Matching is case-insensitive substring matching against the filename.
-#   - cell/nuclei channel files contain "c1"
-#   - collagen channel files contain "sub7000"
-CHANNEL_KEYWORDS = {
-    "collagen": ["sub7000"],
-    "cell": ["C2"],
+DEFAULT_CHANNEL_KEYWORDS = {
+    "collagen": "C1",
+    "cell": "C2",
+    "texture": "autoc,contr,corrm,corrp,cprom,cshad,denth,dissi,dvarh,energ,entro,homom,homop,idmnc,indnc,inf1h,inf2h,maxpr,savgh,senth,sosvh,svarh",
 }
 
 DATAFRAME_MUST_CONTAIN = ["current_final_dataframe_byslice_pos", "trackmate"]
@@ -100,48 +73,199 @@ FEATURE_PREFIXES = (
     'Box-Counting Fractal Dimension', '% High Density Matrix',
 )
 
-DISPLAY_MASK_COLORS = {  # RGB 0-1, used for the overlay panel
-    "r10": (1.0, 0.15, 0.15),
-    "r20": (0.15, 1.0, 0.15),
-    "r30": (0.15, 0.45, 1.0),
-}
+RADIUS_PALETTE = [
+    (1.0, 0.15, 0.15),  # Red
+    (0.15, 1.0, 0.15),  # Green
+    (0.15, 0.45, 1.0),  # Blue
+    (1.0, 0.8, 0.1),   # Yellow/Orange
+    (0.8, 0.2, 1.0),   # Purple
+]
 OVERLAY_ALPHA = 0.45
+
+
+def parse_keyword_field(text):
+    """Splits a comma-separated keyword field into a clean list of
+    non-empty, stripped keywords. Returns [] if empty/whitespace."""
+    if not text:
+        return []
+    return [kw.strip() for kw in text.split(",") if kw.strip()]
+
+
+def find_position_in_text(text, position_keywords):
+    """Searches `text` for position keywords followed by a number.
+    If position_keywords is empty, defaults to assuming single position 'Pos0'."""
+    if not position_keywords:
+        return "Pos0"
+    for keyword in position_keywords:
+        pattern = re.compile(rf'{re.escape(keyword)}[_\- ]*(\d+)', re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            return f"{keyword}{match.group(1)}"
+    return None
+
+
+def clean_cell_id(value):
+    """Normalizes cell identifiers so '0000', 'cell_0', 0, and '0.0' all evaluate to '0'."""
+    if pd.isna(value) or value is None:
+        return ""
+    s = str(value).strip()
+    m = re.search(r'\d+', s)
+    if m:
+        return str(int(m.group()))
+    return s
+
+
+def extract_timepoint_from_filename(filename):
+    """Robustly parses timepoint integers from filenames."""
+    # 1. Match standard patterns like _t44, _t044, tp44, frame44, t=44
+    m = re.search(r'(?:_t|[\-_b]t|timepoint|tp|frame|t=)[_\- ]*(\d+)', filename, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    # 2. Match isolated 't' followed by digits: e.g. t01, T001
+    m = re.search(r'(?:^|[_\-\s/])t(\d+)', filename, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    # 3. Strip Z-slice tags so Z index does not get confused for timepoint
+    clean_name = re.sub(r'(?:_z|[\-_b]z|zslice|z=)[_\- ]*\d+', '', filename, flags=re.IGNORECASE)
+    name_no_ext = re.sub(r'\.[^.]+$', '', clean_name)
+    numbers = re.findall(r'\d+', name_no_ext)
+    if numbers:
+        return int(numbers[-1])
+
+    return None
+
+
+# =====================================================================
+# SLICE EXTRACTOR HELPER
+# =====================================================================
+
+def extract_2d_slice(stack, t_idx, z_idx, expected_t=1, expected_z=1):
+    """Safely extracts a 2D (Y, X) numpy slice from 2D, 3D, 4D, or flattened stacks."""
+    if stack is None:
+        return None
+
+    arr = np.squeeze(np.asarray(stack))
+
+    if arr.ndim == 2:
+        return arr
+
+    elif arr.ndim == 3:
+        d0 = arr.shape[0]
+        # Flattened 3D stack (T*Z, Y, X)
+        if expected_z > 1 and expected_t > 1 and d0 == expected_z * expected_t:
+            flat_idx = int(t_idx) * int(expected_z) + int(z_idx)
+            flat_idx = min(max(0, flat_idx), d0 - 1)
+            return arr[flat_idx, :, :]
+        elif expected_z > 1 and d0 == expected_z:
+            z_c = min(max(0, int(z_idx)), d0 - 1)
+            return arr[z_c, :, :]
+        elif expected_t > 1 and d0 == expected_t:
+            t_c = min(max(0, int(t_idx)), d0 - 1)
+            return arr[t_c, :, :]
+        else:
+            idx = min(max(0, int(z_idx)), d0 - 1)
+            return arr[idx, :, :]
+
+    elif arr.ndim == 4:
+        d0, d1 = arr.shape[0], arr.shape[1]
+        if d0 == expected_t or (d0 != expected_z and d1 == expected_z):
+            # Format (T, Z, Y, X)
+            t_c = min(max(0, int(t_idx)), d0 - 1)
+            z_c = min(max(0, int(z_idx)), d1 - 1)
+            return arr[t_c, z_c, :, :]
+        else:
+            # Format (Z, T, Y, X)
+            z_c = min(max(0, int(z_idx)), d0 - 1)
+            t_c = min(max(0, int(t_idx)), d1 - 1)
+            return arr[z_c, t_c, :, :]
+
+    elif arr.ndim > 4:
+        arr_flat = arr.reshape(-1, arr.shape[-2], arr.shape[-1])
+        idx = min(max(0, int(z_idx)), arr_flat.shape[0] - 1)
+        return arr_flat[idx, :, :]
+
+    return arr
 
 
 # =====================================================================
 # DATA LOADING (dataframes)
 # =====================================================================
 
+def get_mask_from_colname(col, radii):
+    """Extracts the radius mask group from column names safely."""
+    col_lower = col.lower()
 
-def get_mask_from_colname(col):
-    parts = col.lower().split("_")
-    if len(parts) >= 2 and parts[1] in ("r10", "r20", "r30", "full"):
-        return "full" if parts[1] == "full" else parts[1]
-    if "r10" in parts:
-        return "r10"
-    elif "r20" in parts:
-        return "r20"
-    elif "r30" in parts:
-        return "r30"
-    elif "full" in parts:
+    # 1. Match against user-specified radii (longest first to avoid r10 matching r100)
+    sorted_radii = sorted(radii, key=len, reverse=True)
+    for r in sorted_radii:
+        pattern = rf'(?:^|_){re.escape(r.lower())}(?:um)?(?:_|$)'
+        if re.search(pattern, col_lower):
+            return r
+
+    # 2. Match auto-detected _r<number> patterns against user radii case-insensitively
+    m = re.search(r'_(r\d+)(?:um)?(?:_|$)', col_lower)
+    if m:
+        detected = m.group(1)
+        for r in radii:
+            if r.lower() == detected.lower():
+                return r
+        return detected  # Return detected string (defaultdict handles registration)
+
+    if "full" in col_lower:
         return "full"
-    return "full"
+
+    return radii[0] if radii else "full"
 
 
-def clean_feature_name(col):
-    tags = r'(?:_cell_masked|_r10_masked|_r20_masked|_r30_masked|_r10|_r20|_r30|_full|_cell)(?=_|$)'
-    return re.sub(tags, '', col)
+def clean_feature_name(col, radii):
+    """Strips mid-string or trailing radius identifiers (_r10_, _r350_, etc.),
 
-
-def build_long_dataframe(df_folder):
-    """Reproduces the combine/melt/aggregate logic from your combining
-    script and returns a tidy dataframe with columns:
-    position, timepoint, mask_type, cell, feature, value
+    preserving the prefix, statistic (mean/median/std), and texture property name.
     """
+    sorted_radii = sorted(radii, key=len, reverse=True)
+    radii_terms = [re.escape(r) for r in sorted_radii] + [r'r\d+']
+    radii_pattern = "|".join(radii_terms)
+
+    # Matches embedded or trailing radius tokens like _r10_, _r350_, _r10um_
+    pattern = rf'_(?:{radii_pattern})(?:um)?(?:_masked)?(?=_|$)'
+
+    # Remove radius tag and normalize underscores
+    cleaned = re.sub(pattern, '_', col, flags=re.IGNORECASE)
+    cleaned = re.sub(r'_{2,}', '_', cleaned).strip('_')
+
+    return cleaned
+
+STATISTICS = ["mean", "median", "std", "n"]
+
+def split_feature_and_statistic(col, radii):
+    text = str(col).lower()
+    stat_match = re.search(r'\b(?:mean|median|std|n)\b', text)
+    statistic = stat_match.group(0) if stat_match else "mean"
+
+    sorted_radii = sorted(radii, key=len, reverse=True)
+    radius_terms = [re.escape(r.lower()) for r in sorted_radii] + [r'r\d+']
+    cleaned = re.sub(rf'\b(?:texture3d|texture|mean|median|std|n)\b', ' ', text)
+    cleaned = re.sub(rf'\b(?:{"|".join(radius_terms)})(?:um)?\b', ' ', cleaned)
+    cleaned = re.sub(r'[^a-z0-9]+', '_', cleaned).strip('_')
+
+    return statistic, cleaned or text
+
+def tokenize_search_terms(text):
+    if not text:
+        return []
+    return [token.lower() for token in re.findall(r'\w+', text) if token]
+
+def build_long_dataframe(df_folder, position_keywords=None, radii=None):
+    if position_keywords is None:
+        position_keywords = DEFAULT_POSITION_KEYWORDS
+    radii = radii or DEFAULT_RADII
+
     filelist = [
         f for f in os.listdir(df_folder)
         if f.lower().endswith(".csv")
-        and all(k in f for k in DATAFRAME_MUST_CONTAIN)
+        and all(k.lower() in f.lower() for k in DATAFRAME_MUST_CONTAIN)
     ]
     if not filelist:
         raise ValueError(
@@ -152,24 +276,33 @@ def build_long_dataframe(df_folder):
     for f in filelist:
         df = pd.read_csv(os.path.join(df_folder, f))
         df = df.drop(DROP_COLS, axis=1, errors='ignore')
-        if 'position' not in df.columns:
-            m = re.search(r'pos_(\d+)', f, flags=re.IGNORECASE)
-            df['position'] = int(m.group(1)) if m else np.nan
+
+        assigned = find_position_in_text(f, position_keywords)
+        if assigned is None:
+            assigned = "Pos0" if not position_keywords else os.path.splitext(f)[0]
+
+        df["position"] = assigned
         all_frames.append(df)
 
     combined = pd.concat(all_frames, ignore_index=True)
-    combined["position"] = combined["position"].astype("Int64")
+    combined["position"] = combined["position"].astype(str)
 
     id_candidates = ["image_name", "position", "timepoint", "concentration", "cell"]
     id_vars = [c for c in id_candidates if c in combined.columns]
 
-    mask_groups = {"full": [], "r10": [], "r20": [], "r30": []}
+    # Use defaultdict to dynamically register any radius without triggering KeyErrors
+    mask_groups = defaultdict(list)
+    mask_groups["full"] = []
+    for r in radii:
+        mask_groups[r] = []
+
     for col in combined.columns:
         if col in id_vars:
             continue
         if not col.startswith(FEATURE_PREFIXES):
             continue
-        mask_groups[get_mask_from_colname(col)].append(col)
+        mask_type = get_mask_from_colname(col, radii)
+        mask_groups[mask_type].append(col)
 
     long_frames = []
     for mask_type, cols in mask_groups.items():
@@ -188,36 +321,42 @@ def build_long_dataframe(df_folder):
     long = pd.concat(long_frames, ignore_index=True)
     long["value"] = pd.to_numeric(long["value"], errors="coerce")
     long = long.dropna(subset=["value"])
-    long["feature"] = long["feature"].apply(clean_feature_name)
 
-    group_cols = [c for c in ["position", "timepoint", "mask_type", "cell", "feature"]
+    feature_stat = long["feature"].apply(lambda c: split_feature_and_statistic(c, radii))
+    long[["statistic", "feature"]] = pd.DataFrame(feature_stat.tolist(), index=long.index)
+
+    group_cols = [c for c in ["position", "timepoint", "mask_type", "cell", "feature", "statistic"]
                   if c in long.columns]
     grouped = long.groupby(group_cols, as_index=False).agg(value=("value", "mean"))
 
     if "position" in grouped.columns:
         grouped["position"] = grouped["position"].astype(str)
     if "cell" in grouped.columns:
-        grouped["cell"] = grouped["cell"].astype(str)
+        grouped["cell"] = grouped["cell"].apply(clean_cell_id)
     if "timepoint" in grouped.columns:
         grouped["timepoint"] = pd.to_numeric(grouped["timepoint"], errors="coerce")
 
     return grouped
-
 
 # =====================================================================
 # IMAGE / MASK LOADING
 # =====================================================================
 
 class ImageLibrary:
-    """Scans the mask folder and the (separate) raw-channel folder once,
-    and answers lookup questions about where collagen/cell/mask files live
-    for a given position/cell."""
-
-    def __init__(self, mask_folder, channel_folder, user_z, user_t):
+    def __init__(self, mask_folder, channel_folder, user_z, user_t,
+                 channel_keywords=None, position_keywords=None, radii=None):
         self.mask_folder_root = mask_folder
         self.channel_folder_root = channel_folder
         self.user_z = user_z
         self.user_t = user_t
+        self.position_keywords = (position_keywords if position_keywords is not None 
+                                  else DEFAULT_POSITION_KEYWORDS)
+        self.radii = (radii or DEFAULT_RADII)
+
+        self.channel_keywords = channel_keywords or {
+            "collagen": [DEFAULT_CHANNEL_KEYWORDS["collagen"]],
+            "cell": [DEFAULT_CHANNEL_KEYWORDS["cell"]],
+        }
 
         self.mask_files = []
         for root, _, files in os.walk(mask_folder):
@@ -231,73 +370,126 @@ class ImageLibrary:
                 if fn.lower().endswith((".tif", ".tiff")):
                     self.channel_files.append(os.path.join(root, fn))
 
+        self._mask_dirs = []
+        for root, dirs, _ in os.walk(self.mask_folder_root):
+            for d in dirs:
+                self._mask_dirs.append(os.path.join(root, d))
+
         self._cache = {}
+        self._mask_folder_cache = {}
 
     def positions(self):
+        if not self.position_keywords:
+            return ["Pos0"]
         found = set()
-        for path in self.mask_files + self.channel_files:
-            m = POS_REGEX.search(os.path.basename(path))
-            if m:
-                found.add(f"Pos{m.group(1)}")
-        return sorted(found, key=lambda s: int(re.search(r'\d+', s).group()))
+        for path in self.channel_files:
+            pos = find_position_in_text(path, self.position_keywords)
+            if pos:
+                found.add(pos)
+        for path in self.mask_files:
+            pos = find_position_in_text(path, self.position_keywords)
+            if pos:
+                found.add(pos)
+        return sorted(found) if found else ["Pos0"]
 
     def mask_folder(self, pos, radius):
+        cache_key = (pos, radius)
+        if cache_key in self._mask_folder_cache:
+            return self._mask_folder_cache[cache_key]
+
         candidate = os.path.join(
             self.mask_folder_root,
             MASK_FOLDER_TEMPLATE.format(pos=pos, radius=radius),
         )
         if os.path.isdir(candidate):
+            self._mask_folder_cache[cache_key] = candidate
             return candidate
-        target = MASK_FOLDER_TEMPLATE.format(pos=pos, radius=radius).lower()
-        for root, dirs, _ in os.walk(self.mask_folder_root):
-            for d in dirs:
-                if d.lower() == target:
-                    return os.path.join(root, d)
-        return None
+
+        radius_l = radius.lower()
+        pos_l = pos.lower() if pos else ""
+
+        radius_matches = [d for d in self._mask_dirs if radius_l in os.path.basename(d).lower()]
+        pos_and_radius = [d for d in radius_matches if pos_l in os.path.basename(d).lower()]
+
+        if pos_and_radius and self.position_keywords:
+            result = pos_and_radius[0]
+        elif radius_matches:
+            result = radius_matches[0]
+        else:
+            result = None
+
+        self._mask_folder_cache[cache_key] = result
+        return result
 
     def cells_for_position(self, pos):
         cells = set()
-        for radius in RADII:
+        for radius in self.radii:
             folder = self.mask_folder(pos, radius)
             if not folder:
                 continue
             for fn in os.listdir(folder):
-                if pos.lower() in fn.lower():
-                    m = CELL_REGEX.search(fn)
-                    if m:
-                        cells.add(m.group(1))
-        return sorted(cells)
+                m = CELL_REGEX.search(fn)
+                if m:
+                    cells.add(clean_cell_id(m.group(1)))
+        return sorted(cells, key=lambda x: int(x) if x.isdigit() else x)
 
-    def find_channel_file(self, channel, pos, timepoint):
-        """channel is 'collagen' or 'cell'. Searches the raw channel
-        folder (not the mask folder). Returns a filepath or None."""
-        keywords = CHANNEL_KEYWORDS.get(channel, [])
-        t_str1 = f"_t{int(timepoint):02d}"
-        t_str2 = f"_t{int(timepoint) + 1:02d}"
-        candidates = []
+    def find_channel_file(self, channel, pos, timepoint, override_keywords=None):
+        keywords = self.channel_keywords.get(channel, [])
+        if override_keywords:
+            keywords = override_keywords
+
+        target_t = int(timepoint)
+
+        valid_paths = []
         for path in self.channel_files:
+            if self.position_keywords and find_position_in_text(path, self.position_keywords) != pos:
+                continue
             base_l = os.path.basename(path).lower()
-            if pos.lower() not in base_l:
-                continue
-            if not any(k.lower() in base_l for k in keywords):
-                continue
-            if t_str1 in base_l or t_str2 in base_l:
-                candidates.append(path)
-        if not candidates:
-            for path in self.channel_files:
-                base_l = os.path.basename(path).lower()
-                if pos.lower() in base_l and any(k.lower() in base_l for k in keywords):
-                    candidates.append(path)
-        return candidates[0] if candidates else None
+            if any(k.lower() in base_l for k in keywords):
+                valid_paths.append(path)
+
+        if not valid_paths:
+            return None
+
+        # 1. Match exact timepoint in filename
+        for path in valid_paths:
+            tp = extract_timepoint_from_filename(os.path.basename(path))
+            if tp is not None and tp == target_t:
+                return path
+
+        # 2. Match 1-indexed timepoint in filename
+        for path in valid_paths:
+            tp = extract_timepoint_from_filename(os.path.basename(path))
+            if tp is not None and tp == target_t + 1:
+                return path
+
+        # 3. Fallback: return first candidate
+        return valid_paths[0]
 
     def find_mask_file(self, pos, radius, cell):
         folder = self.mask_folder(pos, radius)
         if not folder:
             return None
+
+        pos_l = pos.lower() if pos else ""
+        target_cell = clean_cell_id(cell)
+
+        cell_matches = []
         for fn in os.listdir(folder):
-            if pos.lower() in fn.lower() and f"cell_{cell}" in fn.lower():
-                return os.path.join(folder, fn)
-        return None
+            m = CELL_REGEX.search(fn)
+            if m and clean_cell_id(m.group(1)) == target_cell:
+                cell_matches.append(fn)
+
+        if not cell_matches:
+            return None
+
+        if self.position_keywords:
+            pos_and_cell = [fn for fn in cell_matches if pos_l in fn.lower()]
+            chosen = pos_and_cell[0] if pos_and_cell else cell_matches[0]
+        else:
+            chosen = cell_matches[0]
+
+        return os.path.join(folder, chosen)
 
     def _read_cached(self, path, reader):
         if path not in self._cache:
@@ -305,68 +497,13 @@ class ImageLibrary:
         return self._cache[path]
 
     def load_channel_stack(self, path):
-
         def reader(p):
-
-            arr = np.asarray(tiff.imread(p))
-            arr = np.squeeze(arr)
-
-            expected_t = self.user_t
-            expected_z = self.user_z
-
-            if arr.ndim == 2:
-                arr = arr[np.newaxis, np.newaxis, :, :]
-
-            elif arr.ndim == 3:
-
-                # flattened TZ
-                if arr.shape[0] == expected_t * expected_z:
-                    arr = arr.reshape(
-                        expected_t,
-                        expected_z,
-                        arr.shape[1],
-                        arr.shape[2]
-                    )
-
-                # just Z
-                elif arr.shape[0] == expected_z:
-                    arr = arr[np.newaxis, :, :, :]
-
-                else:
-                    raise ValueError(
-                        f"Cannot interpret image shape {arr.shape}"
-                    )
-
-            elif arr.ndim == 4:
-
-                if arr.shape[:2] != (expected_t, expected_z):
-                    print(
-                        "Warning:",
-                        arr.shape,
-                        "doesn't match expected",
-                        (expected_t, expected_z)
-                    )
-
-            else:
-                raise ValueError(
-                    f"Unsupported image shape {arr.shape}"
-                )
-
-            return arr
-
+            return np.squeeze(np.asarray(tiff.imread(p)))
         return self._read_cached(path, reader)
 
     def load_mask_stack(self, path):
-        """Returns array shaped (T, Z, Y, X)."""
         def reader(p):
-            arr = tiff.imread(p)
-            arr = np.asarray(arr)
-            arr = np.squeeze(arr)
-            if arr.ndim == 3:
-                arr = arr[np.newaxis, ...]
-            elif arr.ndim != 4:
-                raise ValueError(f"Unexpected mask shape {arr.shape} for {p}")
-            return arr
+            return np.squeeze(np.asarray(tiff.imread(p)))
         return self._read_cached(path, reader)
 
 
@@ -375,6 +512,8 @@ class ImageLibrary:
 # =====================================================================
 
 def normalize_for_display(img2d, p_low=2, p_high=98):
+    if img2d is None:
+        return np.zeros((100, 100))
     img2d = img2d.astype(float)
     lo, hi = np.percentile(img2d, [p_low, p_high])
     if hi <= lo:
@@ -383,20 +522,34 @@ def normalize_for_display(img2d, p_low=2, p_high=98):
     return out
 
 
-def build_overlay_rgb(background2d, masks_by_radius, p_low=2, p_high=98):
-    bg = normalize_for_display(background2d, p_low, p_high)
+def build_overlay_rgb(background2d, masks_by_radius, radii_order, color_map,
+                      p_low=2, p_high=98):
+    if background2d is None:
+        mask_shape = next(
+            (mask.shape for mask in masks_by_radius.values() if mask is not None),
+            None
+        )
+        if mask_shape is None:
+            return np.zeros((100, 100, 3))
+        bg = np.zeros(mask_shape, dtype=float)
+    else:
+        bg = normalize_for_display(background2d, p_low, p_high)
+
     rgb = np.stack([bg, bg, bg], axis=-1)
-    for radius in ["r30", "r20", "r10"]:
+
+    for radius in reversed(list(radii_order)):
         mask = masks_by_radius.get(radius)
-        if mask is None:
+        if mask is None or mask.shape != rgb.shape[:2]:
             continue
         m = mask > 0
         if not m.any():
             continue
-        color = np.array(DISPLAY_MASK_COLORS[radius])
+        color = np.array(color_map.get(radius, (1.0, 1.0, 1.0)))
         for c in range(3):
             rgb[..., c] = np.where(
-                m, rgb[..., c] * (1 - OVERLAY_ALPHA) + color[c] * OVERLAY_ALPHA, rgb[..., c]
+                m,
+                rgb[..., c] * (1 - OVERLAY_ALPHA) + color[c] * OVERLAY_ALPHA,
+                rgb[..., c]
             )
     return rgb
 
@@ -415,66 +568,65 @@ class CollagenViewerApp(tk.Tk):
         self.image_lib = None
         self.current_pos = tk.StringVar()
         self.current_feature = tk.StringVar()
+        self.current_statistic = tk.StringVar(value="mean")
         self.all_cells_var = tk.BooleanVar(value=False)
         self.z_var = tk.IntVar(value=0)
         self.t_var = tk.IntVar(value=0)
         self.user_z = tk.IntVar(value=46)
         self.user_t = tk.IntVar(value=25)
+        self.radii = list(DEFAULT_RADII)
+        self.radius_colors = {r: RADIUS_PALETTE[i % len(RADIUS_PALETTE)]
+                              for i, r in enumerate(self.radii)}
         self.contrast_values = {
-            "collagen": {"low": 2.0, "high": 98.0},
-            "cell": {"low": 2.0, "high": 98.0},
+            "collagen": {"low": 2, "high": 98},
+            "cell": {"low": 2, "high": 98},
+            "texture": {"low": 2, "high": 98},
         }
         self.contrast_channel_var = tk.StringVar(value="Collagen")
-        self.contrast_low_var = tk.DoubleVar(value=2.0)
-        self.contrast_high_var = tk.DoubleVar(value=98.0)
+        self.contrast_low_var = tk.DoubleVar(value=2)
+        self.contrast_high_var = tk.DoubleVar(value=98)
 
         self._build_setup_frame()
 
     def load_settings(self):
-
         if not os.path.exists(SETTINGS_FILE):
             return
-
         with open(SETTINGS_FILE, "r") as f:
             settings = json.load(f)
 
-        self.mask_folder_var.set(
-            settings.get("mask_folder", "")
+        self.mask_folder_var.set(settings.get("mask_folder", ""))
+        self.channel_folder_var.set(settings.get("channel_folder", ""))
+        self.df_folder_var.set(settings.get("dataframe_folder", ""))
+        self.user_z.set(settings.get("z_slices", 46))
+        self.user_t.set(settings.get("timepoints", 26))
+        self.collagen_keyword_var.set(
+            settings.get("collagen_keyword", DEFAULT_CHANNEL_KEYWORDS["collagen"])
         )
+        self.cell_keyword_var.set(
+            settings.get("cell_keyword", DEFAULT_CHANNEL_KEYWORDS["cell"])
+        )
+        self.position_keyword_var.set(
+            settings.get("position_keywords", "Pos")
+        )
+        self.radius_var.set(
+            settings.get("radii", "r10,r20,r30")
+        )
+        
 
-        self.channel_folder_var.set(
-            settings.get("channel_folder", "")
-        )
-
-        self.df_folder_var.set(
-            settings.get("dataframe_folder", "")
-        )
-
-        self.user_z.set(
-            settings.get("z_slices", 46)
-        )
-
-        self.user_t.set(
-            settings.get("timepoints", 26)
-        )
     def save_settings(self):
-
         settings = {
-
             "mask_folder": self.mask_folder_var.get(),
-
             "channel_folder": self.channel_folder_var.get(),
-
             "dataframe_folder": self.df_folder_var.get(),
-
             "z_slices": self.user_z.get(),
-
-            "timepoints": self.user_t.get()
+            "timepoints": self.user_t.get(),
+            "collagen_keyword": self.collagen_keyword_var.get(),
+            "cell_keyword": self.cell_keyword_var.get(),
+            "position_keywords": self.position_keyword_var.get(),
+            "radii": self.radius_var.get(),
         }
-
         with open(SETTINGS_FILE, "w") as f:
             json.dump(settings, f, indent=4)
-
 
     def _build_setup_frame(self):
         self.setup_frame = ttk.Frame(self, padding=20)
@@ -486,6 +638,11 @@ class CollagenViewerApp(tk.Tk):
         self.mask_folder_var = tk.StringVar()
         self.channel_folder_var = tk.StringVar()
         self.df_folder_var = tk.StringVar()
+        self.collagen_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["collagen"])
+        self.cell_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["cell"])
+        self.position_keyword_var = tk.StringVar(value="Pos")
+        self.texture_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["texture"])
+        self.radius_var = tk.StringVar(value="r10,r20,r30")
 
         def make_row(label_text, var, browse_title):
             row = ttk.Frame(self.setup_frame)
@@ -496,32 +653,50 @@ class CollagenViewerApp(tk.Tk):
                        command=lambda: self._browse_into(var, browse_title)).pack(side="left")
 
         make_row("Mask folder:", self.mask_folder_var,
-                  "Select folder containing masks3d_per_cell_* subfolders")
+                 "Select folder containing mask subfolders")
         make_row("Raw channel folder:", self.channel_folder_var,
-                  "Select folder containing c1 / sub7000 raw images")
+                 "Select folder containing raw channel images")
         make_row("Dataframe folder:", self.df_folder_var,
-                  "Select folder containing the trackmate CSVs")
+                 "Select folder containing the trackmate CSVs")
+
+        def make_keyword_row(label_text, var, hint):
+            row = ttk.Frame(self.setup_frame)
+            row.pack(fill="x", pady=8)
+            ttk.Label(row, text=label_text, width=22).pack(side="left")
+            ttk.Entry(row, textvariable=var, width=20).pack(side="left", padx=5)
+            ttk.Label(row, text=hint, foreground="gray").pack(side="left", padx=(10, 0))
+
+        make_keyword_row(
+            "Collagen keyword(s):", self.collagen_keyword_var,
+            "filename must contain this (case-insensitive; comma-separate for multiple)",
+        )
+        make_keyword_row(
+            "Cell keyword(s):", self.cell_keyword_var,
+            "filename must contain this (case-insensitive; comma-separate for multiple)",
+        )
+        make_keyword_row(
+            "Position keyword(s):", self.position_keyword_var,
+            "searched in path (e.g. Pos); LEAVE BLANK if only 1 position exists",
+        )
+        make_keyword_row(
+            "Radius label(s):", self.radius_var,
+            "comma-separated radius labels, e.g. r10,r20,r30 or r200,r250,r300",
+        )
+        make_keyword_row(
+            "Texture keyword(s):", self.texture_keyword_var,
+            "filename must contain this (case-insensitive; comma-separate for multiple)",
+        )
 
         zt_frame = ttk.Frame(self.setup_frame)
         zt_frame.pack(pady=10)
 
-        ttk.Label(zt_frame,text="Z slices").grid(row=0,column=0)
+        ttk.Label(zt_frame, text="Z slices").grid(row=0, column=0)
+        ttk.Entry(zt_frame, textvariable=self.user_z, width=6).grid(row=0, column=1, padx=5)
+        ttk.Label(zt_frame, text="Time points").grid(row=0, column=2)
+        ttk.Entry(zt_frame, textvariable=self.user_t, width=6).grid(row=0, column=3, padx=5)
 
-        ttk.Entry(
-            zt_frame,
-            textvariable=self.user_z,
-            width=6
-        ).grid(row=0,column=1,padx=5)
-
-        ttk.Label(zt_frame,text="Time points").grid(row=0,column=2)
-
-        ttk.Entry(
-            zt_frame,
-            textvariable=self.user_t,
-            width=6
-        ).grid(row=0,column=3,padx=5)
-
-        ttk.Button(self.setup_frame, text="Load", command=self._load_everything).pack(pady=20)
+        self.load_button = ttk.Button(self.setup_frame, text="Load", command=self._load_everything)
+        self.load_button.pack(pady=20)
 
         self.setup_status = ttk.Label(self.setup_frame, text="", foreground="red")
         self.setup_status.pack()
@@ -537,6 +712,11 @@ class CollagenViewerApp(tk.Tk):
         channel_folder = self.channel_folder_var.get().strip()
         df_folder = self.df_folder_var.get().strip()
 
+        collagen_keywords = parse_keyword_field(self.collagen_keyword_var.get())
+        cell_keywords = parse_keyword_field(self.cell_keyword_var.get())
+        position_keywords = parse_keyword_field(self.position_keyword_var.get())
+        texture_keywords = parse_keyword_field(self.texture_keyword_var.get())
+        radius_keywords = parse_keyword_field(self.radius_var.get())
         if not mask_folder or not os.path.isdir(mask_folder):
             self.setup_status.config(text="Please choose a valid mask folder.")
             return
@@ -546,704 +726,444 @@ class CollagenViewerApp(tk.Tk):
         if not df_folder or not os.path.isdir(df_folder):
             self.setup_status.config(text="Please choose a valid dataframe folder.")
             return
+        if not collagen_keywords:
+            self.setup_status.config(text="Please enter at least one collagen keyword.")
+            return
+        if not cell_keywords:
+            self.setup_status.config(text="Please enter at least one cell keyword.")
+            return
+        if not radius_keywords:
+            self.setup_status.config(text="Please enter at least one radius label (e.g. r10,r20,r30).")
+            return
+        if not texture_keywords:
+            self.setup_status.config(text="Please enter at least one texture keyword.")
+            return
         self.save_settings()
+        self.load_button.config(state="disabled")
+        self.setup_status.config(foreground="black", text="Loading... this can take a while for large folders.")
+        self.update_idletasks()
+        self._load_result_queue = queue.Queue()
+        worker = threading.Thread(
+            target=self._load_worker,
+            args=(mask_folder, channel_folder, df_folder,
+                  collagen_keywords, cell_keywords,
+                  position_keywords, radius_keywords, texture_keywords),
+            daemon=True,
+        )
+        worker.start()
+        self.after(100, self._poll_load_queue)
+
+    def _load_worker(self, mask_folder, channel_folder, df_folder,
+                     collagen_keywords, cell_keywords,
+                     position_keywords, radius_keywords, texture_keywords):
         try:
-            self.grouped_df = build_long_dataframe(df_folder)
+            grouped_df = build_long_dataframe(
+                df_folder, position_keywords=position_keywords, radii=radius_keywords
+            )
         except Exception as e:
-            self.setup_status.config(text=f"Error loading dataframes: {e}")
             traceback.print_exc()
+            self._load_result_queue.put(("error", f"Error loading dataframes: {e}"))
+            return
+        try:
+            image_lib = ImageLibrary(
+                mask_folder, channel_folder, self.user_z.get(), self.user_t.get(),
+                channel_keywords={
+                    "collagen": collagen_keywords,
+                    "cell": cell_keywords,
+                    "texture": texture_keywords,
+                },
+                position_keywords=position_keywords,
+                radii=radius_keywords,
+            )
+        except Exception as e:
+            traceback.print_exc()
+            self._load_result_queue.put(("error", f"Error scanning image folders: {e}"))
+            return
+        self._load_result_queue.put(("ok", grouped_df, image_lib, radius_keywords))
+
+    def _poll_load_queue(self):
+        try:
+            result = self._load_result_queue.get_nowait()
+        except queue.Empty:
+            self.after(100, self._poll_load_queue)
             return
 
-        try:
-            self.image_lib = ImageLibrary(mask_folder, channel_folder, self.user_z.get(), self.user_t.get())
-        except Exception as e:
-            self.setup_status.config(text=f"Error scanning image folders: {e}")
-            traceback.print_exc()
+        self.load_button.config(state="normal")
+
+        if result[0] == "error":
+            self.setup_status.config(foreground="red", text=result[1])
             return
+
+        _, grouped_df, image_lib, radii = result
+        self.grouped_df = grouped_df
+        self.image_lib = image_lib
+        self.radii = radii
+        self.radius_colors = {r: RADIUS_PALETTE[i % len(RADIUS_PALETTE)]
+                              for i, r in enumerate(self.radii)}
 
         self.setup_frame.destroy()
         self._build_main_ui()
-        
 
     def _build_main_ui(self):
-        controls = ttk.Frame(self, padding=8)
-        controls.pack(fill="x")
+        self.main_container = ttk.Frame(self, padding=8)
+        self.main_container.pack(fill="both", expand=True)
+
+        controls = ttk.Frame(self.main_container)
+        controls.pack(fill="x", pady=(0, 5))
 
         ttk.Label(controls, text="Position:").grid(row=0, column=0, sticky="w")
         self.pos_combo = ttk.Combobox(controls, textvariable=self.current_pos,
-                                       state="readonly", width=12)
+                                      state="readonly", width=12)
         self.pos_combo.grid(row=0, column=1, padx=5)
-        self.pos_combo.bind("<<ComboboxSelected>>", lambda e: self._on_position_change())
+        self.pos_combo.bind("<<ComboboxSelected>>", self._on_position_change)
 
         ttk.Label(controls, text="Feature:").grid(row=0, column=2, sticky="w", padx=(20, 0))
         self.feature_combo = ttk.Combobox(controls, textvariable=self.current_feature,
-                                           state="readonly", width=28)
+                                          state="readonly", width=28)
         self.feature_combo.grid(row=0, column=3, padx=5)
-        self.feature_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_plots())
+        self.feature_combo.bind("<<ComboboxSelected>>", self._refresh_plots)
 
-        ttk.Label(controls, text="Cell(s):").grid(row=0, column=4, sticky="w", padx=(20, 0))
+        ttk.Label(controls, text="Statistic:").grid(row=0, column=4, sticky="w", padx=(20, 0))
+        self.stat_combo = ttk.Combobox(controls, textvariable=self.current_statistic,
+                                       values=[s.title() for s in STATISTICS],
+                                       state="readonly", width=10)
+        self.stat_combo.grid(row=0, column=5, padx=5)
+        self.stat_combo.bind("<<ComboboxSelected>>", self._refresh_plots)
+
+        ttk.Label(controls, text="Cell(s):").grid(row=0, column=6, sticky="w", padx=(20, 0))
         cell_frame = ttk.Frame(controls)
-        cell_frame.grid(row=0, column=5, padx=5)
+        cell_frame.grid(row=0, column=7, padx=5)
         self.cell_listbox = tk.Listbox(cell_frame, selectmode="extended",
-                                        height=4, exportselection=False, width=10)
+                                       height=4, exportselection=False, width=10)
         self.cell_listbox.pack(side="left")
         cell_scroll = ttk.Scrollbar(cell_frame, orient="vertical",
-                                     command=self.cell_listbox.yview)
+                                    command=self.cell_listbox.yview)
         cell_scroll.pack(side="left", fill="y")
         self.cell_listbox.config(yscrollcommand=cell_scroll.set)
-        self.cell_listbox.bind("<<ListboxSelect>>", lambda e: self._on_cell_selection_change())
+        self.cell_listbox.bind("<<ListboxSelect>>", self._on_cell_selection_change)
 
         self.all_cells_check = ttk.Checkbutton(
             controls, text="All cells", variable=self.all_cells_var,
             command=self._on_all_cells_toggle,
         )
-        self.all_cells_check.grid(row=0, column=6, padx=(10, 0))
+        self.all_cells_check.grid(row=0, column=8, padx=(10, 0))
 
         ttk.Button(controls, text="Change folders...", command=self._reset_folders).grid(
-            row=0, column=7, padx=(30, 0)
+            row=0, column=9, padx=(30, 0)
         )
 
-        slider_frame = ttk.Frame(self, padding=(8, 0))
+        slider_frame = ttk.Frame(self.main_container, padding=(0, 4))
         slider_frame.pack(fill="x")
+
         ttk.Label(slider_frame, text="Timepoint:").pack(side="left")
-        self.t_scale = ttk.Scale(slider_frame, from_=0, to=0, orient="horizontal",
-                                  variable=self.t_var, command=lambda v: self._refresh_images())
+        self.t_scale = ttk.Scale(
+            slider_frame, from_=0, to=max(0, self.user_t.get() - 1), orient="horizontal",
+            variable=self.t_var, command=self._on_timepoint_slider
+        )
         self.t_scale.pack(side="left", fill="x", expand=True, padx=5)
         self.t_label = ttk.Label(slider_frame, text="0")
         self.t_label.pack(side="left", padx=(0, 20))
 
         ttk.Label(slider_frame, text="Z-slice:").pack(side="left")
-        self.z_scale = ttk.Scale(slider_frame, from_=0, to=0, orient="horizontal",
-                                  variable=self.z_var, command=lambda v: self._refresh_images())
+        self.z_scale = ttk.Scale(
+            slider_frame, from_=0, to=max(0, self.user_z.get() - 1), orient="horizontal",
+            variable=self.z_var, command=self._on_zslice_slider
+        )
         self.z_scale.pack(side="left", fill="x", expand=True, padx=5)
         self.z_label = ttk.Label(slider_frame, text="0")
         self.z_label.pack(side="left")
 
-        contrast_frame = ttk.Frame(self, padding=(8, 4))
+        contrast_frame = ttk.Frame(self.main_container, padding=(0, 4))
         contrast_frame.pack(fill="x")
-        ttk.Label(contrast_frame, text="Adjust contrast for:").pack(side="left")
-        self.contrast_channel_combo = ttk.Combobox(
-            contrast_frame, textvariable=self.contrast_channel_var,
-            state="readonly", width=10, values=["Collagen", "Cell"],
+
+        ttk.Label(contrast_frame, text="Contrast Settings:").pack(side="left", padx=(0, 10))
+        ttk.Label(contrast_frame, text="Channel:").pack(side="left")
+        contrast_combo = ttk.Combobox(contrast_frame, textvariable=self.contrast_channel_var,
+                                      values=["Collagen", "Cell", "Texture"], state="readonly", width=10)
+        contrast_combo.pack(side="left", padx=5)
+        contrast_combo.bind("<<ComboboxSelected>>", self._on_contrast_channel_change)
+
+        ttk.Label(contrast_frame, text="Low %:").pack(side="left", padx=(10, 0))
+        low_scale = ttk.Scale(
+            contrast_frame, from_=0, to=50, orient="horizontal",
+            variable=self.contrast_low_var, command=self._on_contrast_value_change,
         )
-        self.contrast_channel_combo.pack(side="left", padx=(5, 15))
-        self.contrast_channel_combo.bind(
-            "<<ComboboxSelected>>", lambda e: self._on_contrast_channel_change()
+        low_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.contrast_low_label = ttk.Label(
+            contrast_frame, text=f"{self.contrast_low_var.get():.1f}"
         )
+        self.contrast_low_label.pack(side="left", padx=(5, 10))
 
-        ttk.Label(contrast_frame, text="Low %:").pack(side="left")
-        self.contrast_low_scale = ttk.Scale(
-            contrast_frame, from_=0, to=100, orient="horizontal",
-            variable=self.contrast_low_var, command=lambda v: self._on_contrast_slider_change(),
+        ttk.Label(contrast_frame, text="High %:").pack(side="left", padx=(10, 0))
+        high_scale = ttk.Scale(
+            contrast_frame, from_=50, to=100, orient="horizontal",
+            variable=self.contrast_high_var, command=self._on_contrast_value_change,
         )
-        self.contrast_low_scale.pack(side="left", fill="x", expand=True, padx=5)
-        self.contrast_low_label = ttk.Label(contrast_frame, text="2", width=4)
-        self.contrast_low_label.pack(side="left", padx=(0, 20))
-
-        ttk.Label(contrast_frame, text="High %:").pack(side="left")
-        self.contrast_high_scale = ttk.Scale(
-            contrast_frame, from_=0, to=100, orient="horizontal",
-            variable=self.contrast_high_var, command=lambda v: self._on_contrast_slider_change(),
+        high_scale.pack(side="left", fill="x", expand=True, padx=5)
+        self.contrast_high_label = ttk.Label(
+            contrast_frame, text=f"{self.contrast_high_var.get():.1f}"
         )
-        self.contrast_high_scale.pack(side="left", fill="x", expand=True, padx=5)
-        self.contrast_high_label = ttk.Label(contrast_frame, text="98", width=4)
-        self.contrast_high_label.pack(side="left", padx=(0, 10))
+        self.contrast_high_label.pack(side="left", padx=(5, 0))
 
-        ttk.Button(contrast_frame, text="Reset this channel",
-                   command=self._reset_contrast).pack(side="left")
+        # Matplotlib visualization panes
+        main_paned = ttk.PanedWindow(self.main_container, orient="vertical")
+        main_paned.pack(fill="both", expand=True, pady=5)
 
-        image_panel = ttk.Frame(self, padding=8)
-        image_panel.pack(fill="x")
+        img_frame = ttk.Frame(main_paned)
+        main_paned.add(img_frame, weight=1)
 
-        self.fig_images = Figure(figsize=(16, 4), dpi=100)
+        self.fig_img = Figure(figsize=(12, 4), dpi=100)
+        self.canvas_img = FigureCanvasTkAgg(self.fig_img, master=img_frame)
+        self.canvas_img.get_tk_widget().pack(fill="both", expand=True)
 
-        self.ax_collagen = self.fig_images.add_subplot(1, 4, 1)
-        self.ax_cell = self.fig_images.add_subplot(1, 4, 2)
-        self.ax_overlay = self.fig_images.add_subplot(1, 4, 3)
-        self.ax_cell_overlay = self.fig_images.add_subplot(1, 4, 4)
-        for ax, title in zip(
-            [
-                self.ax_collagen,
-                self.ax_cell,
-                self.ax_overlay,
-                self.ax_cell_overlay
-            ],
-            [
-                "Collagen channel",
-                "Cell / nuclei channel",
-                "Mask overlay on collagen",
-                "Mask overlay on cell"
-            ],
-        ): 
-            ax.set_title(title, fontsize=10)
-            ax.axis("off")
-        self.fig_images.subplots_adjust(
-            left=0.03, right=0.97, top=0.85, bottom=0.22, wspace=0.25
-        )
-        self.canvas_images = FigureCanvasTkAgg(self.fig_images, master=image_panel)
-        self.canvas_images.get_tk_widget().pack(fill="both", expand=True)
+        plot_frame = ttk.Frame(main_paned)
+        main_paned.add(plot_frame, weight=1)
 
-        plot_panel = ttk.Frame(self, padding=8)
-        plot_panel.pack(fill="both", expand=True)
+        self.fig_plot = Figure(figsize=(12, 3), dpi=100)
+        self.canvas_plot = FigureCanvasTkAgg(self.fig_plot, master=plot_frame)
+        self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
-        self.fig_plots = Figure(figsize=(15, 4), dpi=100)
-
-        self.ax_r10 = self.fig_plots.add_subplot(1, 4, 1)
-        self.ax_r20 = self.fig_plots.add_subplot(1, 4, 2)
-        self.ax_r30 = self.fig_plots.add_subplot(1, 4, 3)
-
-        # dedicated legend panel
-        self.ax_legend = self.fig_plots.add_subplot(1, 4, 4)
-
-        self.ax_legend.axis("off")
-        self.ax_legend.set_title(
-            "Cells",
-            fontsize=10
-        )
-        self.canvas_plots = FigureCanvasTkAgg(self.fig_plots, master=plot_panel)
-        self.canvas_plots.get_tk_widget().pack(fill="both", expand=True)
-
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w").pack(
-            fill="x", side="bottom"
-        )
-
-        self._populate_positions()
-        self._populate_features()
-
-    def _reset_folders(self):
-        for child in self.winfo_children():
-            child.destroy()
-        self.grouped_df = None
-        self.image_lib = None
-        self._build_setup_frame()
-
-    def _active_contrast_channel(self):
-        return "collagen" if self.contrast_channel_var.get() == "Collagen" else "cell"
-
-    def _on_contrast_channel_change(self):
-        """Dropdown switched -- load that channel's stored low/high onto
-        the sliders (without touching the other channel's values)."""
-        ch = self._active_contrast_channel()
-        vals = self.contrast_values[ch]
-        self.contrast_low_var.set(vals["low"])
-        self.contrast_high_var.set(vals["high"])
-        self._refresh_images()
-
-    def _on_contrast_slider_change(self):
-        """Slider moved -- save into whichever channel is currently
-        selected in the dropdown, then redraw."""
-        ch = self._active_contrast_channel()
-        self.contrast_values[ch]["low"] = self.contrast_low_var.get()
-        self.contrast_values[ch]["high"] = self.contrast_high_var.get()
-        self._refresh_images()
-
-    def _reset_contrast(self):
-        ch = self._active_contrast_channel()
-        self.contrast_values[ch]["low"] = 2.0
-        self.contrast_values[ch]["high"] = 98.0
-        self.contrast_low_var.set(2.0)
-        self.contrast_high_var.set(98.0)
-        self._refresh_images()
-
-    def _populate_positions(self):
-        df_positions = set(self.grouped_df["position"].unique()) if "position" in self.grouped_df else set()
-        img_positions = set(self.image_lib.positions())
-        df_positions_norm = set()
-        for p in df_positions:
-            m = re.search(r'\d+', str(p))
-            if m:
-                df_positions_norm.add(f"Pos{m.group()}")
-        positions = sorted(img_positions | df_positions_norm,
-                            key=lambda s: int(re.search(r'\d+', s).group())) \
-            if (img_positions | df_positions_norm) else []
+        # Setup combo items
+        positions = self.image_lib.positions() if self.image_lib else ["Pos0"]
         self.pos_combo["values"] = positions
         if positions:
-            self.current_pos.set(positions[0])
-            self._on_position_change()
-        else:
-            self.status_var.set("No positions found in image folders or dataframes.")
+            self.pos_combo.current(0)
 
-    def _populate_features(self):
-        features = sorted(self.grouped_df["feature"].unique()) if "feature" in self.grouped_df else []
-        self.feature_combo["values"] = features
-        if features:
-            self.current_feature.set(features[0])
+        if self.grouped_df is not None and "feature" in self.grouped_df.columns:
+            features = sorted(self.grouped_df["feature"].unique())
+            self.feature_combo["values"] = features
+            if features:
+                self.feature_combo.current(0)
 
-    def _on_position_change(self):
+        self._on_position_change()
+
+    def _on_position_change(self, event=None):
+        if not self.image_lib:
+            return
         pos = self.current_pos.get()
-        pos_num = re.search(r'\d+', pos).group() if re.search(r'\d+', pos) else pos
+        cells = self.image_lib.cells_for_position(pos)
 
-        img_cells = set(self.image_lib.cells_for_position(pos))
-        df_cells = set()
-        if "cell" in self.grouped_df.columns:
-            sub = self.grouped_df[self.grouped_df["position"].astype(str).str.contains(
-                pos_num, na=False)]
-            df_cells = set(c for c in sub["cell"].unique() if str(c).lower() != "full")
-
-        cells = sorted(img_cells | df_cells)
-        self.cell_listbox.delete(0, "end")
+        self.cell_listbox.delete(0, tk.END)
         for c in cells:
-            self.cell_listbox.insert("end", c)
+            self.cell_listbox.insert(tk.END, c)
+
         if cells:
-            self.cell_listbox.selection_set(0)
+            self.cell_listbox.select_set(0)
 
-        if "timepoint" in self.grouped_df.columns:
-            sub = self.grouped_df[self.grouped_df["position"].astype(str).str.contains(
-                pos_num, na=False)]
-            tps = sub["timepoint"].dropna().unique()
-            max_t = int(max(tps)) if len(tps) else 0
-        else:
-            max_t = 0
-        self.t_scale.config(to=max(max_t, 0))
-        self.t_var.set(0)
-
-        z_max = 0
-        sample_path = self.image_lib.find_channel_file("collagen", pos, 0)
-        if sample_path:
-            try:
-                stack = self.image_lib.load_channel_stack(sample_path)
-                z_max = stack.shape[1] - 1
-            except Exception:
-                pass
-        self.z_scale.config(to=max(z_max, 0))
-        self.z_var.set(0)
-
-        self._on_cell_selection_change()
         self._refresh_images()
+        self._refresh_plots()
+
+    def _on_cell_selection_change(self, event=None):
+        if self.cell_listbox.curselection():
+            self.all_cells_var.set(False)
+        self._refresh_images()
+        self._refresh_plots()
 
     def _on_all_cells_toggle(self):
         if self.all_cells_var.get():
-            self.cell_listbox.selection_set(0, "end")
-        self._refresh_plots()
-
-    def _on_cell_selection_change(self):
+            self.cell_listbox.selection_clear(0, tk.END)
         self._refresh_images()
         self._refresh_plots()
 
-    def selected_cells(self):
-        if self.all_cells_var.get():
-            return list(self.cell_listbox.get(0, "end"))
-        return [self.cell_listbox.get(i) for i in self.cell_listbox.curselection()]
-
-    def primary_cell(self):
-        cells = self.selected_cells()
-        return cells[0] if cells else None
-
-    def _refresh_images(self, *_):
-
-        if self.image_lib is None:
-            return
-
-        pos = self.current_pos.get()
-        cell = self.primary_cell()
-
-        t = int(round(self.t_var.get()))
-        z = int(round(self.z_var.get()))
-
+    def _on_timepoint_slider(self, val):
+        t = int(float(val))
+        self.t_var.set(t)
         self.t_label.config(text=str(t))
+        self._refresh_images()
+
+    def _on_zslice_slider(self, val):
+        z = int(float(val))
+        self.z_var.set(z)
         self.z_label.config(text=str(z))
+        self._refresh_images()
 
-        # Independent contrast per channel. The sliders currently show
-        # (and edit) whichever channel is selected in the dropdown; both
-        # channels' stored values are always used for their own image.
-        collagen_low, collagen_high = (self.contrast_values["collagen"]["low"],
-                                        self.contrast_values["collagen"]["high"])
-        cell_low, cell_high = (self.contrast_values["cell"]["low"],
-                                self.contrast_values["cell"]["high"])
-        if collagen_high <= collagen_low:
-            collagen_high = collagen_low + 1
-        if cell_high <= cell_low:
-            cell_high = cell_low + 1
+    def _on_contrast_channel_change(self, event=None):
+        """Switches the spinbox values when changing channels in the dropdown."""
+        ch = self.contrast_channel_var.get().lower()
+        if ch in self.contrast_values:
+            # Temporarily unbind/disable live updates while loading channel values
+            self.contrast_low_var.set(self.contrast_values[ch]["low"])
+            self.contrast_high_var.set(self.contrast_values[ch]["high"])
+            self._refresh_images()
 
-        active_ch = self._active_contrast_channel()
-        active_low, active_high = (
-            (collagen_low, collagen_high) if active_ch == "collagen" else (cell_low, cell_high)
-        )
-        self.contrast_low_label.config(text=f"{active_low:.0f}")
-        self.contrast_high_label.config(text=f"{active_high:.0f}")
-
-
-        # Clear previous images/text
-        for ax in (self.ax_collagen, self.ax_cell, self.ax_overlay, self.ax_cell_overlay
-        ):
-            ax.clear()
-            ax.axis("off")
-
-
-        self.ax_collagen.set_title(
-            "Collagen channel",
-            fontsize=10
-        )
-
-        self.ax_cell.set_title(
-            "Cell / nuclei channel",
-            fontsize=10
-        )
-
-        self.ax_overlay.set_title(
-            "Mask overlay (r10/r20/r30)",
-            fontsize=10
-        )
-        self.ax_cell_overlay.set_title(
-            "Mask overlay on cell",
-             fontsize=10
-        )
-
-        collagen_slice = None
-
-
-        # -----------------------------
-        # COLLAGEN IMAGE
-        # -----------------------------
+    def _on_contrast_value_change(self, event=None):
+        """Safely reads the contrast fields and redraws the images."""
+        ch = self.contrast_channel_var.get().lower()
+        if ch not in self.contrast_values:
+            return
 
         try:
-
-            collagen_path = self.image_lib.find_channel_file(
-                "collagen",
-                pos,
-                t
-            )
-
-            if collagen_path:
-
-                stack = self.image_lib.load_channel_stack(collagen_path)
-
-                t_clamped = min(t, stack.shape[0]-1)
-                z_clamped = min(z, stack.shape[1]-1)
-
-                collagen_slice = stack[
-                    t_clamped,
-                    z_clamped
-                ]
-
-                self.ax_collagen.imshow(
-                    normalize_for_display(collagen_slice, collagen_low, collagen_high),
-                    cmap="gray"
-                )
-
-                filename = os.path.basename(collagen_path)
-
-                wrapped = "\n".join(
-                    textwrap.wrap(
-                        filename,
-                        width=40,
-                        break_long_words=True,
-                        break_on_hyphens=True,
-                    )
-                )
-
-                self.ax_collagen.text(
-                    0.5,
-                    -0.06,
-                    wrapped,
-                    transform=self.ax_collagen.transAxes,
-                    ha="center",
-                    va="top",
-                    fontsize=7,
-                    clip_on=False
-                )
-
-
-            else:
-
-                self.ax_collagen.text(
-                    0.5,
-                    0.5,
-                    "collagen image not found\n(sub7000)",
-                    transform=self.ax_collagen.transAxes,
-                    ha="center",
-                    va="center",
-                    fontsize=9
-                )
-
-
-        except Exception as e:
-
-            self.ax_collagen.text(
-                0.5,
-                0.5,
-                f"error:\n{e}",
-                transform=self.ax_collagen.transAxes,
-                ha="center",
-                va="center",
-                fontsize=8
-            )
-
-
-
-        # -----------------------------
-        # CELL IMAGE
-        # -----------------------------
-
-        try:
-
-            cell_path = self.image_lib.find_channel_file(
-                "cell",
-                pos,
-                t
-            )
-
-            if cell_path:
-
-                stack = self.image_lib.load_channel_stack(cell_path)
-
-                t_clamped = min(t, stack.shape[0]-1)
-                z_clamped = min(z, stack.shape[1]-1)
-
-                cell_slice = stack[t_clamped, z_clamped]
-
-                self.ax_cell.imshow(
-                    normalize_for_display(cell_slice, cell_low, cell_high),
-                    cmap="gray"
-                )
-
-                filename = os.path.basename(cell_path)
-
-                wrapped = "\n".join(
-                    textwrap.wrap(
-                        filename,
-                        width=40,
-                        break_long_words=True,
-                        break_on_hyphens=True,
-                    )
-                )
-
-                self.ax_cell.text(
-                    0.5,
-                    -0.06,
-                    wrapped,
-                    transform=self.ax_cell.transAxes,
-                    ha="center",
-                    va="top",
-                    fontsize=7,
-                    clip_on=False
-                )
-
-
-            else:
-
-                self.ax_cell.text(
-                    0.5,
-                    0.5,
-                    "cell channel image not found\n(c1)",
-                    transform=self.ax_cell.transAxes,
-                    ha="center",
-                    va="center",
-                    fontsize=9
-                )
-
-
-        except Exception as e:
-
-            self.ax_cell.text(
-                0.5,
-                0.5,
-                f"error:\n{e}",
-                transform=self.ax_cell.transAxes,
-                ha="center",
-                va="center",
-                fontsize=8
-            )
-
-
-
-        # -----------------------------
-        # MASK OVERLAY
-        # -----------------------------
-
-        try:
-
-            if cell is not None:
-
-                masks_2d = {}
-
-                for radius in RADII:
-
-                    mpath = self.image_lib.find_mask_file(
-                        pos,
-                        radius,
-                        cell
-                    )
-
-                    if not mpath:
-                        continue
-
-
-                    mstack = self.image_lib.load_mask_stack(mpath)
-
-                    t_clamped = min(
-                        t,
-                        mstack.shape[0]-1
-                    )
-
-                    z_clamped = min(
-                        z,
-                        mstack.shape[1]-1
-                    )
-
-                    masks_2d[radius] = mstack[
-                        t_clamped,
-                        z_clamped
-                    ]
-
-
-                if masks_2d:
-
-                    if collagen_slice is not None:
-                        overlay = build_overlay_rgb(
-                            collagen_slice,
-                            masks_2d,
-                            collagen_low,
-                            collagen_high
-                        )
-
-                        self.ax_overlay.imshow(overlay)
-
-
-                # overlay on cell image
-                if 'cell_slice' in locals():
-
-                    cell_overlay = build_overlay_rgb(
-                        cell_slice,
-                        masks_2d,
-                        cell_low,
-                        cell_high
-                    )
-
-                    self.ax_cell_overlay.imshow(
-                        cell_overlay
-                    )
-
-
-                else:
-
-                    for ax in (
-                        self.ax_overlay,
-                        self.ax_cell_overlay
-                    ):
-                        ax.text(
-                            0.5,
-                            0.5,
-                            "no masks found for this cell",
-                            ha="center",
-                            va="center",
-                            fontsize=9
-                        )
-
-
-            else:
-
-                self.ax_overlay.text(
-                    0.5,
-                    0.5,
-                    "select a cell",
-                    transform=self.ax_overlay.transAxes,
-                    ha="center",
-                    va="center"
-                )
-
-
-        except Exception as e:
-
-            self.ax_overlay.text(
-                0.5,
-                0.5,
-                f"error:\n{e}",
-                transform=self.ax_overlay.transAxes,
-                ha="center",
-                va="center",
-                fontsize=8
-            )
-
-
-        self.canvas_images.draw_idle()
-
-    def _refresh_plots(self, *_):
-        if self.grouped_df is None:
+            low_val = float(self.contrast_low_var.get())
+            high_val = float(self.contrast_high_var.get())
+        except (tk.TclError, ValueError):
+            # Ignore intermediate states while the user is actively backspacing/typing
+            return
+
+        # Ensure low percentile stays below high percentile
+        if low_val < high_val:
+            self.contrast_values[ch]["low"] = low_val
+            self.contrast_values[ch]["high"] = high_val
+            self._refresh_images()
+
+    def _reset_folders(self):
+        if hasattr(self, "main_container"):
+            self.main_container.destroy()
+        self._build_setup_frame()
+
+    def _get_selected_cells(self):
+        if self.all_cells_var.get():
+            return [self.cell_listbox.get(i) for i in range(self.cell_listbox.size())]
+
+        sel_indices = self.cell_listbox.curselection()
+        if not sel_indices:
+            if self.cell_listbox.size() > 0:
+                return [self.cell_listbox.get(0)]
+            return []
+        return [self.cell_listbox.get(i) for i in sel_indices]
+
+    def _refresh_images(self):
+        if not self.image_lib:
             return
         pos = self.current_pos.get()
-        pos_num = re.search(r'\d+', pos).group() if re.search(r'\d+', pos) else pos
-        feature = self.current_feature.get()
-        cells = self.selected_cells()
-        print("feature:", feature)
-        print("cells:", cells)
-        print("rows:", len(self.grouped_df))
+        t = self.t_var.get()
+        z = self.z_var.get()
+        collagen_file = self.image_lib.find_channel_file("collagen", pos, t)
+        cell_file = self.image_lib.find_channel_file("cell", pos, t)
+        texture_file = self.image_lib.find_channel_file(
+            "texture", pos, t
+        )
+        collagen_img = None
+        cell_img = None
+        texture_img = None
 
-        axes = {"r10": self.ax_r10, "r20": self.ax_r20, "r30": self.ax_r30}
-        legend_handles = []
-        legend_labels = []
-        for radius, ax in axes.items():
-            ax.clear()
-            ax.set_title(f"{feature or ''}  ({radius})", fontsize=10)
-            ax.set_xlabel("Timepoint")
-            ax.set_ylabel("Value")
+        if collagen_file:
+            stack = self.image_lib.load_channel_stack(collagen_file)
+            collagen_img = extract_2d_slice(stack, t, z, self.user_t.get(), self.user_z.get())
 
-        if not feature or not cells:
-            self.canvas_plots.draw_idle()
+        if cell_file:
+            stack = self.image_lib.load_channel_stack(cell_file)
+            cell_img = extract_2d_slice(stack, t, z, self.user_t.get(), self.user_z.get())
+
+        if texture_file:
+            stack = self.image_lib.load_channel_stack(texture_file)
+            texture_img = extract_2d_slice(stack, t, z, self.user_t.get(), self.user_z.get())
+
+        selected_cells = self._get_selected_cells()
+
+        masks_by_radius = {}
+        for r in self.radii:
+            combined_mask = None
+            for c in selected_cells:
+                mf = self.image_lib.find_mask_file(pos, r, c)
+                if mf:
+                    m_stack = self.image_lib.load_mask_stack(mf)
+                    m_slice = extract_2d_slice(m_stack, t, z, self.user_t.get(), self.user_z.get())
+                    if m_slice is not None:
+                        if combined_mask is None:
+                            combined_mask = (m_slice > 0).astype(np.uint8)
+                        else:
+                            combined_mask = np.logical_or(combined_mask, m_slice > 0).astype(np.uint8)
+            if combined_mask is not None:
+                masks_by_radius[r] = combined_mask
+
+        collagen_c = self.contrast_values["collagen"]
+        cell_c = self.contrast_values["cell"]
+        texture_c = self.contrast_values["texture"]
+
+        collagen_norm = normalize_for_display(collagen_img, collagen_c["low"], collagen_c["high"])
+        cell_norm = normalize_for_display(cell_img, cell_c["low"], cell_c["high"])
+        texture_norm = normalize_for_display(texture_img, texture_c["low"], texture_c["high"])
+
+        collagen_overlay = build_overlay_rgb(
+            collagen_img, masks_by_radius, self.radii, self.radius_colors,
+            p_low=collagen_c["low"], p_high=collagen_c["high"]
+        )
+        cell_overlay = build_overlay_rgb(
+            cell_img, masks_by_radius, self.radii, self.radius_colors,
+            p_low=cell_c["low"], p_high=cell_c["high"]
+        )
+        texture_overlay = build_overlay_rgb(
+            texture_img, masks_by_radius, self.radii, self.radius_colors,
+            p_low=texture_c["low"], p_high=texture_c["high"]
+        )
+
+        self.fig_img.clear()
+        axes = self.fig_img.subplots(1, 5)
+
+        axes[0].imshow(collagen_norm, cmap="gray")
+        axes[0].set_title("Collagen Raw", fontsize=10)
+        axes[0].axis("off")
+
+        axes[1].imshow(cell_norm, cmap="gray")
+        axes[1].set_title("Cell Raw", fontsize=10)
+        axes[1].axis("off")
+
+        axes[2].imshow(texture_norm, cmap="gray")
+        axes[2].set_title("Texture Raw", fontsize=10)
+        axes[2].axis("off")
+
+        axes[3].imshow(collagen_overlay)
+        axes[3].set_title("Collagen Overlay", fontsize=10)
+        axes[3].axis("off")
+
+        axes[4].imshow(cell_overlay)
+        axes[4].set_title("Cell Overlay", fontsize=10)
+        axes[4].axis("off")
+
+        self.fig_img.tight_layout()
+        self.canvas_img.draw_idle()
+
+    def _refresh_plots(self, event=None):
+        if self.grouped_df is None or self.grouped_df.empty:
             return
 
-        df = self.grouped_df
-        sub = df[
-            (df["position"].astype(str).str.contains(pos_num, na=False))
-            & (df["feature"] == feature)
+        pos = self.current_pos.get()
+        feat = self.current_feature.get()
+        stat = self.current_statistic.get().lower()
+
+        df_pos_feat = self.grouped_df[
+            (self.grouped_df["position"] == pos) &
+            (self.grouped_df["feature"] == feat) &
+            (self.grouped_df["statistic"] == stat)
         ]
 
-        for radius, ax in axes.items():
+        self.fig_plot.clear()
 
-            rsub = sub[sub["mask_type"] == radius]
+        n_radii = len(self.radii)
+        if n_radii == 0:
+            self.canvas_plot.draw_idle()
+            return
 
-            for cell in cells:
+        axes = self.fig_plot.subplots(1, n_radii, sharey=True)
+        if n_radii == 1:
+            axes = [axes]
 
-                csub = rsub[
-                    rsub["cell"].astype(str) == str(cell)
-                ].sort_values("timepoint")
+        for idx, r in enumerate(self.radii):
+            ax = axes[idx]
+            df_r = df_pos_feat[df_pos_feat["mask_type"] == r]
 
-                if csub.empty:
-                    continue
+            if not df_r.empty and self._get_selected_cells():
+                for cell_id in self._get_selected_cells():
+                    df_cell = df_r[df_r["cell"] == str(cell_id)].sort_values("timepoint")
+                    if not df_cell.empty:
+                        ax.plot(
+                            df_cell["timepoint"],
+                            df_cell["value"],
+                            marker=".",
+                            linewidth=1.5,
+                            label=f"Cell {cell_id}"
+                        )
 
-                line, = ax.plot(
-                    csub["timepoint"],
-                    csub["value"],
-                    marker="o",
-                    label=f"cell {cell}"
-                )
+            ax.set_title(f"Radius: {r}", fontsize=10)
+            ax.set_xlabel("Timepoint")
+            if idx == 0:
+                ax.set_ylabel(feat, fontsize=9)
+            ax.grid(True, linestyle=":", alpha=0.6)
+            if len(self._get_selected_cells()) > 1 and len(self._get_selected_cells()) <= 10:
+                ax.legend(fontsize="xx-small", loc="best")
 
-                # Add each cell only once to legend
-                if f"cell {cell}" not in legend_labels:
-                    legend_handles.append(line)
-                    legend_labels.append(f"cell {cell}")
-                                
-
-            self.fig_plots.subplots_adjust(
-                left=0.02,
-                right=0.98,
-                bottom=0.15,
-                wspace=0.25
-            )
-            self.ax_legend.clear()
-            self.ax_legend.axis("off")
-
-            if legend_handles:
-
-                self.ax_legend.legend(
-                    legend_handles,
-                    legend_labels,
-                    loc="upper left",
-                    fontsize=8,
-                    frameon=False
-                )
-
-            else:
-
-                self.ax_legend.text(
-                    0.5,
-                    0.5,
-                    "No cells",
-                    ha="center",
-                    va="center"
-                )
-        self.canvas_plots.draw_idle()
+        self.fig_plot.tight_layout()
+        self.canvas_plot.draw_idle()
 
 
 if __name__ == "__main__":
