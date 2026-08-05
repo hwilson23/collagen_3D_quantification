@@ -117,6 +117,11 @@ def clean_cell_id(value):
 
 def extract_timepoint_from_filename(filename):
     """Robustly parses timepoint integers from filenames."""
+    #0. Match timepoint after channel tag
+    m = re.search(r'CH\d{2}_(\d+)', filename,re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
     # 1. Match standard patterns like _t44, _t044, tp44, frame44, t=44
     m = re.search(r'(?:_t|[\-_b]t|timepoint|tp|frame|t=)[_\- ]*(\d+)', filename, re.IGNORECASE)
     if m:
@@ -239,17 +244,28 @@ def clean_feature_name(col, radii):
 
 STATISTICS = ["mean", "median", "std", "n"]
 
-def split_feature_and_statistic(col, radii):
+def split_feature_and_statistic(col, radii, texture_keywords=None):
     text = str(col).lower()
-    stat_match = re.search(r'\b(?:mean|median|std|n)\b', text)
-    statistic = stat_match.group(0) if stat_match else "mean"
+    parts = text.split('_')
 
-    sorted_radii = sorted(radii, key=len, reverse=True)
-    radius_terms = [re.escape(r.lower()) for r in sorted_radii] + [r'r\d+']
-    cleaned = re.sub(rf'\b(?:texture3d|texture|mean|median|std|n)\b', ' ', text)
-    cleaned = re.sub(rf'\b(?:{"|".join(radius_terms)})(?:um)?\b', ' ', cleaned)
-    cleaned = re.sub(r'[^a-z0-9]+', '_', cleaned).strip('_')
+    stat_terms = {"mean", "median", "std", "n"}
+    statistic = next((p for p in parts if p in stat_terms), "mean")
 
+    radius_terms = {r.lower() for r in radii}
+    radius_pattern = re.compile(r'^r\d+(um)?$')
+
+    # Only strip generic structural tags — NOT the property name itself
+    boilerplate = {"texture", "texture3d", "masked"}
+
+    kept = []
+    for p in parts:
+        if not p or p in stat_terms or p in boilerplate:
+            continue
+        if p in radius_terms or radius_pattern.match(p):
+            continue
+        kept.append(p)
+
+    cleaned = "_".join(kept)
     return statistic, cleaned or text
 
 def tokenize_search_terms(text):
@@ -257,10 +273,11 @@ def tokenize_search_terms(text):
         return []
     return [token.lower() for token in re.findall(r'\w+', text) if token]
 
-def build_long_dataframe(df_folder, position_keywords=None, radii=None):
+def build_long_dataframe(df_folder, position_keywords=None, radii=None, texture_keywords=None):
     if position_keywords is None:
         position_keywords = DEFAULT_POSITION_KEYWORDS
     radii = radii or DEFAULT_RADII
+    texture_keywords = texture_keywords or [kw for kw in DEFAULT_CHANNEL_KEYWORDS["texture"].split(",") if kw]
 
     filelist = [
         f for f in os.listdir(df_folder)
@@ -302,6 +319,8 @@ def build_long_dataframe(df_folder, position_keywords=None, radii=None):
         if not col.startswith(FEATURE_PREFIXES):
             continue
         mask_type = get_mask_from_colname(col, radii)
+        if mask_type == "full":
+            continue
         mask_groups[mask_type].append(col)
 
     long_frames = []
@@ -322,7 +341,12 @@ def build_long_dataframe(df_folder, position_keywords=None, radii=None):
     long["value"] = pd.to_numeric(long["value"], errors="coerce")
     long = long.dropna(subset=["value"])
 
-    feature_stat = long["feature"].apply(lambda c: split_feature_and_statistic(c, radii))
+    unique_cols = long["feature"].unique()
+    mapping = {
+        col: split_feature_and_statistic(col, radii, texture_keywords=texture_keywords)
+        for col in unique_cols
+    }
+    feature_stat = long["feature"].map(mapping)
     long[["statistic", "feature"]] = pd.DataFrame(feature_stat.tolist(), index=long.index)
 
     group_cols = [c for c in ["position", "timepoint", "mask_type", "cell", "feature", "statistic"]
@@ -344,9 +368,10 @@ def build_long_dataframe(df_folder, position_keywords=None, radii=None):
 
 class ImageLibrary:
     def __init__(self, mask_folder, channel_folder, user_z, user_t,
-                 channel_keywords=None, position_keywords=None, radii=None):
+                 channel_keywords=None, position_keywords=None, radii=None,texture_folder=None):
         self.mask_folder_root = mask_folder
         self.channel_folder_root = channel_folder
+        self.texture_folder = texture_folder
         self.user_z = user_z
         self.user_t = user_t
         self.position_keywords = (position_keywords if position_keywords is not None 
@@ -369,6 +394,13 @@ class ImageLibrary:
             for fn in files:
                 if fn.lower().endswith((".tif", ".tiff")):
                     self.channel_files.append(os.path.join(root, fn))
+
+        if texture_folder and os.path.isdir(texture_folder):
+            for root, _, files in os.walk(texture_folder):
+                for fn in files:
+                    if fn.lower().endswith((".tif", ".tiff")):
+                        self.channel_files.append(os.path.join(root, fn))
+
 
         self._mask_dirs = []
         for root, dirs, _ in os.walk(self.mask_folder_root):
@@ -596,6 +628,7 @@ class CollagenViewerApp(tk.Tk):
 
         self.mask_folder_var.set(settings.get("mask_folder", ""))
         self.channel_folder_var.set(settings.get("channel_folder", ""))
+        self.texture_folder_var.set(settings.get("texture_folder", ""))
         self.df_folder_var.set(settings.get("dataframe_folder", ""))
         self.user_z.set(settings.get("z_slices", 46))
         self.user_t.set(settings.get("timepoints", 26))
@@ -618,6 +651,7 @@ class CollagenViewerApp(tk.Tk):
             "mask_folder": self.mask_folder_var.get(),
             "channel_folder": self.channel_folder_var.get(),
             "dataframe_folder": self.df_folder_var.get(),
+            "texture_folder": self.texture_folder_var.get(),
             "z_slices": self.user_z.get(),
             "timepoints": self.user_t.get(),
             "collagen_keyword": self.collagen_keyword_var.get(),
@@ -637,6 +671,7 @@ class CollagenViewerApp(tk.Tk):
 
         self.mask_folder_var = tk.StringVar()
         self.channel_folder_var = tk.StringVar()
+        self.texture_folder_var = tk.StringVar()
         self.df_folder_var = tk.StringVar()
         self.collagen_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["collagen"])
         self.cell_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["cell"])
@@ -656,6 +691,8 @@ class CollagenViewerApp(tk.Tk):
                  "Select folder containing mask subfolders")
         make_row("Raw channel folder:", self.channel_folder_var,
                  "Select folder containing raw channel images")
+        make_row("Texture folder:", self.texture_folder_var,
+                 "Select folder containing texture images")
         make_row("Dataframe folder:", self.df_folder_var,
                  "Select folder containing the trackmate CSVs")
 
@@ -710,6 +747,7 @@ class CollagenViewerApp(tk.Tk):
     def _load_everything(self):
         mask_folder = self.mask_folder_var.get().strip()
         channel_folder = self.channel_folder_var.get().strip()
+        texture_folder = self.texture_folder_var.get().strip()
         df_folder = self.df_folder_var.get().strip()
 
         collagen_keywords = parse_keyword_field(self.collagen_keyword_var.get())
@@ -745,7 +783,7 @@ class CollagenViewerApp(tk.Tk):
         self._load_result_queue = queue.Queue()
         worker = threading.Thread(
             target=self._load_worker,
-            args=(mask_folder, channel_folder, df_folder,
+            args=(mask_folder, channel_folder, texture_folder, df_folder,
                   collagen_keywords, cell_keywords,
                   position_keywords, radius_keywords, texture_keywords),
             daemon=True,
@@ -753,12 +791,12 @@ class CollagenViewerApp(tk.Tk):
         worker.start()
         self.after(100, self._poll_load_queue)
 
-    def _load_worker(self, mask_folder, channel_folder, df_folder,
+    def _load_worker(self, mask_folder, channel_folder, texture_folder, df_folder,
                      collagen_keywords, cell_keywords,
                      position_keywords, radius_keywords, texture_keywords):
         try:
             grouped_df = build_long_dataframe(
-                df_folder, position_keywords=position_keywords, radii=radius_keywords
+                df_folder, position_keywords=position_keywords, radii=radius_keywords, texture_keywords=texture_keywords
             )
         except Exception as e:
             traceback.print_exc()
@@ -774,6 +812,7 @@ class CollagenViewerApp(tk.Tk):
                 },
                 position_keywords=position_keywords,
                 radii=radius_keywords,
+                texture_folder=texture_folder
             )
         except Exception as e:
             traceback.print_exc()
@@ -821,7 +860,8 @@ class CollagenViewerApp(tk.Tk):
         self.feature_combo = ttk.Combobox(controls, textvariable=self.current_feature,
                                           state="readonly", width=28)
         self.feature_combo.grid(row=0, column=3, padx=5)
-        self.feature_combo.bind("<<ComboboxSelected>>", self._refresh_plots)
+        self.feature_combo.bind("<<ComboboxSelected>>", self._on_feature_change)
+        
 
         ttk.Label(controls, text="Statistic:").grid(row=0, column=4, sticky="w", padx=(20, 0))
         self.stat_combo = ttk.Combobox(controls, textvariable=self.current_statistic,
@@ -959,6 +999,10 @@ class CollagenViewerApp(tk.Tk):
         self._refresh_images()
         self._refresh_plots()
 
+    def _on_feature_change(self, event=None):
+        self._refresh_images()
+        self._refresh_plots()
+
     def _on_all_cells_toggle(self):
         if self.all_cells_var.get():
             self.cell_listbox.selection_clear(0, tk.END)
@@ -1027,10 +1071,13 @@ class CollagenViewerApp(tk.Tk):
         pos = self.current_pos.get()
         t = self.t_var.get()
         z = self.z_var.get()
+        current_feature = self.current_feature.get()
+
         collagen_file = self.image_lib.find_channel_file("collagen", pos, t)
         cell_file = self.image_lib.find_channel_file("cell", pos, t)
         texture_file = self.image_lib.find_channel_file(
-            "texture", pos, t
+            "texture", pos, t,
+            override_keywords = [current_feature] if current_feature else None
         )
         collagen_img = None
         cell_img = None
