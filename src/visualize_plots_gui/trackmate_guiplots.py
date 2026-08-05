@@ -216,39 +216,26 @@ def get_mask_from_colname(col, radii):
         for r in radii:
             if r.lower() == detected.lower():
                 return r
+            else:
+                print(f"Warning: Detected radius '{detected}' in column '{col}' does not match any user-specified radii {radii}.")
+                return None  # Return None if no match found
         return detected  # Return detected string (defaultdict handles registration)
 
     if "full" in col_lower:
         return "full"
+    else:
+        print(f"Warning: Could not determine radius mask for column '{col}'. Defaulting to 'full'.")
 
     return radii[0] if radii else "full"
 
 
-def clean_feature_name(col, radii):
-    """Strips mid-string or trailing radius identifiers (_r10_, _r350_, etc.),
-
-    preserving the prefix, statistic (mean/median/std), and texture property name.
-    """
-    sorted_radii = sorted(radii, key=len, reverse=True)
-    radii_terms = [re.escape(r) for r in sorted_radii] + [r'r\d+']
-    radii_pattern = "|".join(radii_terms)
-
-    # Matches embedded or trailing radius tokens like _r10_, _r350_, _r10um_
-    pattern = rf'_(?:{radii_pattern})(?:um)?(?:_masked)?(?=_|$)'
-
-    # Remove radius tag and normalize underscores
-    cleaned = re.sub(pattern, '_', col, flags=re.IGNORECASE)
-    cleaned = re.sub(r'_{2,}', '_', cleaned).strip('_')
-
-    return cleaned
-
-STATISTICS = ["mean", "median", "std", "n"]
+STATISTICS = ["mean", "median", "std"]
 
 def split_feature_and_statistic(col, radii, texture_keywords=None):
     text = str(col).lower()
     parts = text.split('_')
 
-    stat_terms = {"mean", "median", "std", "n"}
+    stat_terms = {"mean", "median", "std"}
     statistic = next((p for p in parts if p in stat_terms), "mean")
 
     radius_terms = {r.lower() for r in radii}
@@ -267,11 +254,6 @@ def split_feature_and_statistic(col, radii, texture_keywords=None):
 
     cleaned = "_".join(kept)
     return statistic, cleaned or text
-
-def tokenize_search_terms(text):
-    if not text:
-        return []
-    return [token.lower() for token in re.findall(r'\w+', text) if token]
 
 def build_long_dataframe(df_folder, position_keywords=None, radii=None, texture_keywords=None):
     if position_keywords is None:
@@ -898,7 +880,7 @@ class CollagenViewerApp(tk.Tk):
         ttk.Label(slider_frame, text="Timepoint:").pack(side="left")
         self.t_scale = ttk.Scale(
             slider_frame, from_=0, to=max(0, self.user_t.get() - 1), orient="horizontal",
-            variable=self.t_var, command=self._on_timepoint_slider
+            variable=self.t_var, command=lambda v: self._on_scale_change(v, self.t_var, self.t_label)
         )
         self.t_scale.pack(side="left", fill="x", expand=True, padx=5)
         self.t_label = ttk.Label(slider_frame, text="0")
@@ -907,7 +889,7 @@ class CollagenViewerApp(tk.Tk):
         ttk.Label(slider_frame, text="Z-slice:").pack(side="left")
         self.z_scale = ttk.Scale(
             slider_frame, from_=0, to=max(0, self.user_z.get() - 1), orient="horizontal",
-            variable=self.z_var, command=self._on_zslice_slider
+            variable=self.z_var, command=lambda v: self._on_scale_change(v, self.z_var, self.z_label)
         )
         self.z_scale.pack(side="left", fill="x", expand=True, padx=5)
         self.z_label = ttk.Label(slider_frame, text="0")
@@ -1009,17 +991,12 @@ class CollagenViewerApp(tk.Tk):
         self._refresh_images()
         self._refresh_plots()
 
-    def _on_timepoint_slider(self, val):
-        t = int(float(val))
-        self.t_var.set(t)
-        self.t_label.config(text=str(t))
+    def _on_scale_change(self, val, var, label):
+        v = int(float(val))
+        var.set(v)
+        label.config(text=str(v))
         self._refresh_images()
 
-    def _on_zslice_slider(self, val):
-        z = int(float(val))
-        self.z_var.set(z)
-        self.z_label.config(text=str(z))
-        self._refresh_images()
 
     def _on_contrast_channel_change(self, event=None):
         """Switches the spinbox values when changing channels in the dropdown."""
@@ -1065,6 +1042,24 @@ class CollagenViewerApp(tk.Tk):
             return []
         return [self.cell_listbox.get(i) for i in sel_indices]
 
+    def _build_masks(self, pos, t, z, selected_cells):
+        masks_by_radius = {}
+        for r in self.radii:
+            combined_mask = None
+            for c in selected_cells:
+                mf = self.image_lib.find_mask_file(pos, r, c)
+                if not mf:
+                    continue
+                m_stack = self.image_lib.load_mask_stack(mf)
+                m_slice = extract_2d_slice(m_stack, t, z, self.user_t.get(), self.user_z.get())
+                if m_slice is None:
+                    continue
+                m = (m_slice > 0)
+                combined_mask = m if combined_mask is None else np.logical_or(combined_mask, m)
+            if combined_mask is not None:
+                masks_by_radius[r] = combined_mask.astype(np.uint8)
+        return masks_by_radius
+
     def _refresh_images(self):
         if not self.image_lib:
             return
@@ -1073,89 +1068,38 @@ class CollagenViewerApp(tk.Tk):
         z = self.z_var.get()
         current_feature = self.current_feature.get()
 
-        collagen_file = self.image_lib.find_channel_file("collagen", pos, t)
-        cell_file = self.image_lib.find_channel_file("cell", pos, t)
-        texture_file = self.image_lib.find_channel_file(
-            "texture", pos, t,
-            override_keywords = [current_feature] if current_feature else None
-        )
-        collagen_img = None
-        cell_img = None
-        texture_img = None
-
-        if collagen_file:
-            stack = self.image_lib.load_channel_stack(collagen_file)
-            collagen_img = extract_2d_slice(stack, t, z, self.user_t.get(), self.user_z.get())
-
-        if cell_file:
-            stack = self.image_lib.load_channel_stack(cell_file)
-            cell_img = extract_2d_slice(stack, t, z, self.user_t.get(), self.user_z.get())
-
-        if texture_file:
-            stack = self.image_lib.load_channel_stack(texture_file)
-            texture_img = extract_2d_slice(stack, t, z, self.user_t.get(), self.user_z.get())
+        channel_overrides = {"texture": [current_feature] if current_feature else None}
 
         selected_cells = self._get_selected_cells()
+        masks_by_radius = self._build_masks(pos, t, z, selected_cells)
 
-        masks_by_radius = {}
-        for r in self.radii:
-            combined_mask = None
-            for c in selected_cells:
-                mf = self.image_lib.find_mask_file(pos, r, c)
-                if mf:
-                    m_stack = self.image_lib.load_mask_stack(mf)
-                    m_slice = extract_2d_slice(m_stack, t, z, self.user_t.get(), self.user_z.get())
-                    if m_slice is not None:
-                        if combined_mask is None:
-                            combined_mask = (m_slice > 0).astype(np.uint8)
-                        else:
-                            combined_mask = np.logical_or(combined_mask, m_slice > 0).astype(np.uint8)
-            if combined_mask is not None:
-                masks_by_radius[r] = combined_mask
-
-        collagen_c = self.contrast_values["collagen"]
-        cell_c = self.contrast_values["cell"]
-        texture_c = self.contrast_values["texture"]
-
-        collagen_norm = normalize_for_display(collagen_img, collagen_c["low"], collagen_c["high"])
-        cell_norm = normalize_for_display(cell_img, cell_c["low"], cell_c["high"])
-        texture_norm = normalize_for_display(texture_img, texture_c["low"], texture_c["high"])
-
-        collagen_overlay = build_overlay_rgb(
-            collagen_img, masks_by_radius, self.radii, self.radius_colors,
-            p_low=collagen_c["low"], p_high=collagen_c["high"]
-        )
-        cell_overlay = build_overlay_rgb(
-            cell_img, masks_by_radius, self.radii, self.radius_colors,
-            p_low=cell_c["low"], p_high=cell_c["high"]
-        )
-        texture_overlay = build_overlay_rgb(
-            texture_img, masks_by_radius, self.radii, self.radius_colors,
-            p_low=texture_c["low"], p_high=texture_c["high"]
-        )
+        imgs, norms, overlays = {}, {}, {}
+        for ch in ("collagen", "cell", "texture"):
+            f = self.image_lib.find_channel_file(ch, pos, t, override_keywords=channel_overrides.get(ch))
+            img = None
+            if f:
+                stack = self.image_lib.load_channel_stack(f)
+                img = extract_2d_slice(stack, t, z, self.user_t.get(), self.user_z.get())
+            c = self.contrast_values[ch]
+            imgs[ch] = img
+            norms[ch] = normalize_for_display(img, c["low"], c["high"])
+            overlays[ch] = build_overlay_rgb(img, masks_by_radius, self.radii, self.radius_colors,
+                                            p_low=c["low"], p_high=c["high"])
 
         self.fig_img.clear()
-        axes = self.fig_img.subplots(1, 5)
-
-        axes[0].imshow(collagen_norm, cmap="gray")
-        axes[0].set_title("Collagen Raw", fontsize=10)
-        axes[0].axis("off")
-
-        axes[1].imshow(cell_norm, cmap="gray")
-        axes[1].set_title("Cell Raw", fontsize=10)
-        axes[1].axis("off")
-
-        axes[2].imshow(texture_norm, cmap="gray")
-        axes[2].set_title("Texture Raw", fontsize=10)
-        axes[2].axis("off")
-
-        axes[3].imshow(collagen_overlay)
-        axes[3].set_title("Collagen Overlay", fontsize=10)
-        axes[3].axis("off")
-
-        axes[4].imshow(cell_overlay)
-        axes[4].set_title("Cell Overlay", fontsize=10)
-        axes[4].axis("off")
+        axes = self.fig_img.subplots(1, 6)
+        panels = [
+            (norms["collagen"], "Collagen Raw", False),
+            (norms["cell"], "Cell Raw", False),
+            (norms["texture"], "Texture Raw", False),
+            (overlays["collagen"], "Collagen Overlay", True),
+            (overlays["cell"], "Cell Overlay", True),
+            (overlays["texture"], "Texture Overlay", True),
+        ]
+        for ax, (data, title, _) in zip(axes, panels):
+            ax.imshow(data, cmap=None if _ else "gray")
+            ax.set_title(title, fontsize=10)
+            ax.axis("off")
 
         self.fig_img.tight_layout()
         self.canvas_img.draw_idle()
