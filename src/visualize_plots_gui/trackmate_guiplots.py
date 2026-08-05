@@ -602,55 +602,91 @@ class CollagenViewerApp(tk.Tk):
 
         self._build_setup_frame()
 
-    def load_settings(self):
+    def _load_all_settings_file(self):
         if not os.path.exists(SETTINGS_FILE):
-            return
+            return {"experiments": {}, "last_used": None}
         with open(SETTINGS_FILE, "r") as f:
-            settings = json.load(f)
+            data = json.load(f)
+        data.setdefault("experiments", {})
+        data.setdefault("last_used", None)
+        return data
 
-        self.mask_folder_var.set(settings.get("mask_folder", ""))
-        self.channel_folder_var.set(settings.get("channel_folder", ""))
-        self.texture_folder_var.set(settings.get("texture_folder", ""))
-        self.df_folder_var.set(settings.get("dataframe_folder", ""))
-        self.user_z.set(settings.get("z_slices", 46))
-        self.user_t.set(settings.get("timepoints", 26))
-        self.collagen_keyword_var.set(
-            settings.get("collagen_keyword", DEFAULT_CHANNEL_KEYWORDS["collagen"])
-        )
-        self.cell_keyword_var.set(
-            settings.get("cell_keyword", DEFAULT_CHANNEL_KEYWORDS["cell"])
-        )
-        self.position_keyword_var.set(
-            settings.get("position_keywords", "Pos")
-        )
-        self.radius_var.set(
-            settings.get("radii", "r10,r20,r30")
-        )
-        
-
-    def save_settings(self):
-        settings = {
+    def _settings_snapshot(self):
+        return {
             "mask_folder": self.mask_folder_var.get(),
             "channel_folder": self.channel_folder_var.get(),
-            "dataframe_folder": self.df_folder_var.get(),
             "texture_folder": self.texture_folder_var.get(),
+            "dataframe_folder": self.df_folder_var.get(),
             "z_slices": self.user_z.get(),
             "timepoints": self.user_t.get(),
             "collagen_keyword": self.collagen_keyword_var.get(),
             "cell_keyword": self.cell_keyword_var.get(),
             "position_keywords": self.position_keyword_var.get(),
             "radii": self.radius_var.get(),
+            "texture_keyword": self.texture_keyword_var.get(),
         }
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=4)
 
+    def _apply_settings(self, settings):
+        self.mask_folder_var.set(settings.get("mask_folder", ""))
+        self.channel_folder_var.set(settings.get("channel_folder", ""))
+        self.texture_folder_var.set(settings.get("texture_folder", ""))
+        self.df_folder_var.set(settings.get("dataframe_folder", ""))
+        self.user_z.set(settings.get("z_slices", 46))
+        self.user_t.set(settings.get("timepoints", 26))
+        self.collagen_keyword_var.set(settings.get("collagen_keyword", DEFAULT_CHANNEL_KEYWORDS["collagen"]))
+        self.cell_keyword_var.set(settings.get("cell_keyword", DEFAULT_CHANNEL_KEYWORDS["cell"]))
+        self.position_keyword_var.set(settings.get("position_keywords", "Pos"))
+        self.radius_var.set(settings.get("radii", "r10,r20,r30"))
+        self.texture_keyword_var.set(settings.get("texture_keyword", DEFAULT_CHANNEL_KEYWORDS["texture"]))
+
+    def load_settings(self):
+        data = self._load_all_settings_file()
+        names = sorted(data["experiments"].keys())
+        self.experiment_combo["values"] = names
+
+        last_used = data.get("last_used")
+        if last_used and last_used in data["experiments"]:
+            self.experiment_name_var.set(last_used)
+            self._apply_settings(data["experiments"][last_used])
+        elif names:
+            self.experiment_name_var.set(names[0])
+            self._apply_settings(data["experiments"][names[0]])
+
+    def save_settings(self):
+        data = self._load_all_settings_file()
+        name = self.experiment_name_var.get().strip() or "Default"
+        data["experiments"][name] = self._settings_snapshot()
+        data["last_used"] = name
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+        self.experiment_combo["values"] = sorted(data["experiments"].keys())
+
+    def delete_current_experiment(self):
+        data = self._load_all_settings_file()
+        name = self.experiment_name_var.get().strip()
+        if name in data["experiments"]:
+            del data["experiments"][name]
+            if data.get("last_used") == name:
+                data["last_used"] = None
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(data, f, indent=4)
+            self.experiment_combo["values"] = sorted(data["experiments"].keys())
+            self.setup_status.config(foreground="black", text=f"Deleted experiment '{name}'.")
+
+    def _on_experiment_selected(self, event=None):
+        data = self._load_all_settings_file()
+        name = self.experiment_name_var.get()
+        if name in data["experiments"]:
+            self._apply_settings(data["experiments"][name])
     def _build_setup_frame(self):
         self.setup_frame = ttk.Frame(self, padding=20)
         self.setup_frame.pack(fill="both", expand=True)
 
         ttk.Label(self.setup_frame, text="Collagen 3D Quantification Viewer",
                   font=("Segoe UI", 16, "bold")).pack(pady=(0, 20))
+        
 
+        self.experiment_name_var = tk.StringVar(value="Default")
         self.mask_folder_var = tk.StringVar()
         self.channel_folder_var = tk.StringVar()
         self.texture_folder_var = tk.StringVar()
@@ -660,6 +696,17 @@ class CollagenViewerApp(tk.Tk):
         self.position_keyword_var = tk.StringVar(value="Pos")
         self.texture_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["texture"])
         self.radius_var = tk.StringVar(value="r10,r20,r30")
+
+        exp_frame = ttk.Frame(self.setup_frame)
+        exp_frame.pack(fill="x", pady=(0, 12))
+        ttk.Label(exp_frame, text="Experiment name:", width=22).pack(side="left")
+        self.experiment_combo = ttk.Combobox(
+            exp_frame, textvariable=self.experiment_name_var, width=30
+        )
+        self.experiment_combo.pack(side="left", padx=5)
+        self.experiment_combo.bind("<<ComboboxSelected>>", self._on_experiment_selected)
+        ttk.Button(exp_frame, text="Delete", command=self.delete_current_experiment).pack(side="left", padx=(5, 0)) 
+
 
         def make_row(label_text, var, browse_title):
             row = ttk.Frame(self.setup_frame)
