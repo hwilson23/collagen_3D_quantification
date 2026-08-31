@@ -69,7 +69,7 @@ DEFAULT_CHANNEL_KEYWORDS = {
     "R": "R1"
 }
 
-DATAFRAME_MUST_CONTAIN = ["current_final_dataframe_byslice_pos", "trackmate"]
+DATAFRAME_MUST_CONTAIN = ["dataframe_byslice_pos", "trackmate"]
 
 DROP_COLS = ['TotalImageArea', 'distance3d', 
              'bin_num3d', 'roi', 'type']
@@ -1245,6 +1245,10 @@ class CollagenViewerApp(tk.Tk):
         feat = self.current_feature.get()
         stat = self.current_statistic.get().lower()
         R = self.current_R.get()
+
+        print("current_R:", repr(R))
+        print("unique neighbor3d values:", self.grouped_df["neighbor3d"].unique())
+        print("unique dtypes:", self.grouped_df["neighbor3d"].dtype)
 
         df_pos_feat = self.grouped_df[
             (self.grouped_df["position"] == pos) &
