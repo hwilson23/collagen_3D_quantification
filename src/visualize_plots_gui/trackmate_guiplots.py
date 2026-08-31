@@ -48,10 +48,17 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # =====================================================================
 
 DEFAULT_POSITION_KEYWORDS = ["Pos"]
-DEFAULT_RADII = ["r10", "r20", "r30"]
+
+# Radius labels must match the suffix used by trackmate_shell_masks.py, i.e.
+# "r{outer}um" for a solid sphere (inner_radius_um = 0) or
+# "r{inner}to{outer}um" for a shell/doughnut mask.
+DEFAULT_RADII = ["r200um", "r150to200um", "r200to250um", "r250to350um"]
 CELL_REGEX = re.compile(r'cell_(\d+)', re.IGNORECASE)
 
-MASK_FOLDER_TEMPLATE = "masks3d_per_cell_{pos}_{radius}um"
+# Radius label is already the full folder suffix (e.g. "r200um" or
+# "r150to200um") produced by trackmate_shell_masks.py, so it is NOT modified
+# here -- do not append "um" again.
+MASK_FOLDER_TEMPLATE = "masks3d_per_cell_{pos}_{radius}"
 
 SETTINGS_FILE = "collagen_viewer_settings.json"
 
@@ -59,11 +66,12 @@ DEFAULT_CHANNEL_KEYWORDS = {
     "collagen": "C1",
     "cell": "C2",
     "texture": "autoc,contr,corrm,corrp,cprom,cshad,denth,dissi,dvarh,energ,entro,homom,homop,idmnc,indnc,inf1h,inf2h,maxpr,savgh,senth,sosvh,svarh",
+    "R": "R1"
 }
 
 DATAFRAME_MUST_CONTAIN = ["current_final_dataframe_byslice_pos", "trackmate"]
 
-DROP_COLS = ['TotalImageArea', 'distance3d', 'neighbor3d',
+DROP_COLS = ['TotalImageArea', 'distance3d', 
              'bin_num3d', 'roi', 'type']
 
 FEATURE_PREFIXES = (
@@ -199,27 +207,34 @@ def extract_2d_slice(stack, t_idx, z_idx, expected_t=1, expected_z=1):
 # =====================================================================
 
 def get_mask_from_colname(col, radii):
-    """Extracts the radius mask group from column names safely."""
+    """Extracts the radius mask group from column names safely.
+
+    Recognizes both solid-sphere labels ("r200um") and shell/doughnut
+    labels ("r150to200um") produced by trackmate_shell_masks.py.
+    """
     col_lower = col.lower()
 
-    # 1. Match against user-specified radii (longest first to avoid r10 matching r100)
+    # 1. Match against user-specified radii (longest first to avoid r10 matching r100,
+    #    and to avoid "r200um" matching inside "r200to250um")
     sorted_radii = sorted(radii, key=len, reverse=True)
     for r in sorted_radii:
-        pattern = rf'(?:^|_){re.escape(r.lower())}(?:um)?(?:_|$)'
+        pattern = rf'(?:^|_){re.escape(r.lower())}(?:_|$)'
         if re.search(pattern, col_lower):
             return r
 
-    # 2. Match auto-detected _r<number> patterns against user radii case-insensitively
-    m = re.search(r'_(r\d+)(?:um)?(?:_|$)', col_lower)
+    # 2. Match auto-detected _r<number>(to<number>)?(um)? patterns against user radii,
+    #    case-insensitively. Handles both "r200um" and "r150to200um" style tags.
+    m = re.search(r'_(r\d+(?:to\d+)?)(?:um)?(?:_|$)', col_lower)
     if m:
         detected = m.group(1)
         for r in radii:
-            if r.lower() == detected.lower():
+            # Compare against the radius label with any trailing "um" stripped too,
+            # so "r200um" (detected) still matches a user radius of "r200um".
+            r_norm = r.lower()[:-2] if r.lower().endswith('um') else r.lower()
+            if r_norm == detected or r.lower() == detected:
                 return r
-            else:
-                print(f"Warning: Detected radius '{detected}' in column '{col}' does not match any user-specified radii {radii}.")
-                return None  # Return None if no match found
-        return detected  # Return detected string (defaultdict handles registration)
+        #print(f"Warning: Detected radius '{detected}' in column '{col}' does not match any user-specified radii {radii}.")
+        return None  # Return None if no match found
 
     if "full" in col_lower:
         return "full"
@@ -239,7 +254,8 @@ def split_feature_and_statistic(col, radii, texture_keywords=None):
     statistic = next((p for p in parts if p in stat_terms), "mean")
 
     radius_terms = {r.lower() for r in radii}
-    radius_pattern = re.compile(r'^r\d+(um)?$')
+    # Matches both "r200um" (solid sphere) and "r150to200um" (shell) style tags.
+    radius_pattern = re.compile(r'^r\d+(?:to\d+)?(?:um)?$')
 
     # Only strip generic structural tags — NOT the property name itself
     boilerplate = {"texture", "texture3d", "masked"}
@@ -255,11 +271,14 @@ def split_feature_and_statistic(col, radii, texture_keywords=None):
     cleaned = "_".join(kept)
     return statistic, cleaned or text
 
-def build_long_dataframe(df_folder, position_keywords=None, radii=None, texture_keywords=None):
+def build_long_dataframe(df_folder, position_keywords=None, radii=None, texture_keywords=None, R_keywords=None):
     if position_keywords is None:
         position_keywords = DEFAULT_POSITION_KEYWORDS
     radii = radii or DEFAULT_RADII
     texture_keywords = texture_keywords or [kw for kw in DEFAULT_CHANNEL_KEYWORDS["texture"].split(",") if kw]
+    R_keywords = R_keywords or [kw for kw in DEFAULT_CHANNEL_KEYWORDS["R"].split(",") if kw]
+    print("R_keywords in build_long_dataframe:", R_keywords)
+    
 
     filelist = [
         f for f in os.listdir(df_folder)
@@ -286,7 +305,7 @@ def build_long_dataframe(df_folder, position_keywords=None, radii=None, texture_
     combined = pd.concat(all_frames, ignore_index=True)
     combined["position"] = combined["position"].astype(str)
 
-    id_candidates = ["image_name", "position", "timepoint", "concentration", "cell"]
+    id_candidates = ["image_name", "position", "timepoint", "concentration", "cell", "neighbor3d"]
     id_vars = [c for c in id_candidates if c in combined.columns]
 
     # Use defaultdict to dynamically register any radius without triggering KeyErrors
@@ -331,12 +350,13 @@ def build_long_dataframe(df_folder, position_keywords=None, radii=None, texture_
     feature_stat = long["feature"].map(mapping)
     long[["statistic", "feature"]] = pd.DataFrame(feature_stat.tolist(), index=long.index)
 
-    group_cols = [c for c in ["position", "timepoint", "mask_type", "cell", "feature", "statistic"]
-                  if c in long.columns]
+    group_cols = [c for c in ["position", "timepoint", "mask_type", "cell", "feature", "statistic","neighbor3d"] if c in long.columns]
     grouped = long.groupby(group_cols, as_index=False).agg(value=("value", "mean"))
 
     if "position" in grouped.columns:
         grouped["position"] = grouped["position"].astype(str)
+    if "neighbor3d" in grouped.columns:
+        grouped["neighbor3d"] = grouped["neighbor3d"].astype(str)
     if "cell" in grouped.columns:
         grouped["cell"] = grouped["cell"].apply(clean_cell_id)
     if "timepoint" in grouped.columns:
@@ -363,6 +383,7 @@ class ImageLibrary:
         self.channel_keywords = channel_keywords or {
             "collagen": [DEFAULT_CHANNEL_KEYWORDS["collagen"]],
             "cell": [DEFAULT_CHANNEL_KEYWORDS["cell"]],
+            "R": [DEFAULT_CHANNEL_KEYWORDS["R"]]
         }
 
         self.mask_files = []
@@ -422,6 +443,11 @@ class ImageLibrary:
         radius_l = radius.lower()
         pos_l = pos.lower() if pos else ""
 
+        # Substring match on folder basenames. Since radius labels like "r200um"
+        # and "r150to200um" are matched as full substrings (not prefixes), a
+        # solid-sphere label like "r200um" will not incorrectly match a shell
+        # folder such as "r200to250um" (the literal text "r200um" does not
+        # appear inside "r200to250um").
         radius_matches = [d for d in self._mask_dirs if radius_l in os.path.basename(d).lower()]
         pos_and_radius = [d for d in radius_matches if pos_l in os.path.basename(d).lower()]
 
@@ -447,38 +473,68 @@ class ImageLibrary:
                     cells.add(clean_cell_id(m.group(1)))
         return sorted(cells, key=lambda x: int(x) if x.isdigit() else x)
 
-    def find_channel_file(self, channel, pos, timepoint, override_keywords=None):
+    def find_channel_file(self,channel,pos,timepoint,current_r,override_keywords=None,match_all=False):
+        
         keywords = self.channel_keywords.get(channel, [])
+        #print(f"Default keywords for channel '{channel}': {keywords}")
+
         if override_keywords:
             keywords = override_keywords
 
+        # Make a copy so we don't accidentally modify the original
+        keywords = list(keywords)
+
+        print(f"Final search keywords: {keywords}")
+
         target_t = int(timepoint)
 
+        def _kw_in(base_l, kw):
+            pattern = rf'(?:^|[_\-\.]){re.escape(str(kw).lower())}(?:[_\-\.]|$)'
+            return re.search(pattern, base_l) is not None
+
         valid_paths = []
+
         for path in self.channel_files:
-            if self.position_keywords and find_position_in_text(path, self.position_keywords) != pos:
-                continue
+            if self.position_keywords:
+                found_pos = find_position_in_text(
+                    path,
+                    self.position_keywords
+                )
+
+                # Only exclude on a conflicting position tag
+                if found_pos is not None and found_pos != pos:
+                    continue
+
             base_l = os.path.basename(path).lower()
-            if any(k.lower() in base_l for k in keywords):
-                valid_paths.append(path)
+
+            if match_all:
+                if keywords and all(_kw_in(base_l, k) for k in keywords):
+                    valid_paths.append(path)
+            else:
+                if any(_kw_in(base_l, k) for k in keywords):
+                    valid_paths.append(path)
 
         if not valid_paths:
+            print("no valid path")
             return None
 
-        # 1. Match exact timepoint in filename
         for path in valid_paths:
-            tp = extract_timepoint_from_filename(os.path.basename(path))
+            tp = extract_timepoint_from_filename(
+                os.path.basename(path)
+            )
             if tp is not None and tp == target_t:
                 return path
 
-        # 2. Match 1-indexed timepoint in filename
         for path in valid_paths:
-            tp = extract_timepoint_from_filename(os.path.basename(path))
+            tp = extract_timepoint_from_filename(
+                os.path.basename(path)
+            )
             if tp is not None and tp == target_t + 1:
                 return path
 
-        # 3. Fallback: return first candidate
+        print(valid_paths)
         return valid_paths[0]
+
 
     def find_mask_file(self, pos, radius, cell):
         folder = self.mask_folder(pos, radius)
@@ -583,6 +639,7 @@ class CollagenViewerApp(tk.Tk):
         self.current_pos = tk.StringVar()
         self.current_feature = tk.StringVar()
         self.current_statistic = tk.StringVar(value="mean")
+        self.current_R = tk.StringVar(value="R1")
         self.all_cells_var = tk.BooleanVar(value=False)
         self.z_var = tk.IntVar(value=0)
         self.t_var = tk.IntVar(value=0)
@@ -624,6 +681,7 @@ class CollagenViewerApp(tk.Tk):
             "position_keywords": self.position_keyword_var.get(),
             "radii": self.radius_var.get(),
             "texture_keyword": self.texture_keyword_var.get(),
+            "R_keyword": self.R_keyword_var.get(),
         }
 
     def _apply_settings(self, settings):
@@ -636,8 +694,9 @@ class CollagenViewerApp(tk.Tk):
         self.collagen_keyword_var.set(settings.get("collagen_keyword", DEFAULT_CHANNEL_KEYWORDS["collagen"]))
         self.cell_keyword_var.set(settings.get("cell_keyword", DEFAULT_CHANNEL_KEYWORDS["cell"]))
         self.position_keyword_var.set(settings.get("position_keywords", "Pos"))
-        self.radius_var.set(settings.get("radii", "r10,r20,r30"))
+        self.radius_var.set(settings.get("radii", ",".join(DEFAULT_RADII)))
         self.texture_keyword_var.set(settings.get("texture_keyword", DEFAULT_CHANNEL_KEYWORDS["texture"]))
+        self.R_keyword_var.set(settings.get("R_keyword", DEFAULT_CHANNEL_KEYWORDS["R"]))
 
     def load_settings(self):
         data = self._load_all_settings_file()
@@ -695,7 +754,8 @@ class CollagenViewerApp(tk.Tk):
         self.cell_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["cell"])
         self.position_keyword_var = tk.StringVar(value="Pos")
         self.texture_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["texture"])
-        self.radius_var = tk.StringVar(value="r10,r20,r30")
+        self.R_keyword_var = tk.StringVar(value=DEFAULT_CHANNEL_KEYWORDS["R"])
+        self.radius_var = tk.StringVar(value=",".join(DEFAULT_RADII))
 
         exp_frame = ttk.Frame(self.setup_frame)
         exp_frame.pack(fill="x", pady=(0, 12))
@@ -746,11 +806,16 @@ class CollagenViewerApp(tk.Tk):
         )
         make_keyword_row(
             "Radius label(s):", self.radius_var,
-            "comma-separated radius labels, e.g. r10,r20,r30 or r200,r250,r300",
+            "comma-separated, matching mask folder suffix exactly, "
+            "e.g. r200um (solid sphere) or r150to200um (shell, inner-to-outer)",
         )
         make_keyword_row(
             "Texture keyword(s):", self.texture_keyword_var,
             "filename must contain this (case-insensitive; comma-separate for multiple)",
+        )
+        make_keyword_row(
+            "R keyword (for texture radius):", self.R_keyword_var,
+            "eg. R1,R3",
         )
 
         zt_frame = ttk.Frame(self.setup_frame)
@@ -783,6 +848,7 @@ class CollagenViewerApp(tk.Tk):
         cell_keywords = parse_keyword_field(self.cell_keyword_var.get())
         position_keywords = parse_keyword_field(self.position_keyword_var.get())
         texture_keywords = parse_keyword_field(self.texture_keyword_var.get())
+        R_keywords = parse_keyword_field(self.R_keyword_var.get())
         radius_keywords = parse_keyword_field(self.radius_var.get())
         if not mask_folder or not os.path.isdir(mask_folder):
             self.setup_status.config(text="Please choose a valid mask folder.")
@@ -800,10 +866,13 @@ class CollagenViewerApp(tk.Tk):
             self.setup_status.config(text="Please enter at least one cell keyword.")
             return
         if not radius_keywords:
-            self.setup_status.config(text="Please enter at least one radius label (e.g. r10,r20,r30).")
+            self.setup_status.config(text="Please enter at least one radius label (e.g. r200um,r150to200um).")
             return
         if not texture_keywords:
             self.setup_status.config(text="Please enter at least one texture keyword.")
+            return
+        if not R_keywords:
+            self.setup_status.config(text="Please enter at least one R keyword for texture radius.")
             return
         self.save_settings()
         self.load_button.config(state="disabled")
@@ -814,7 +883,7 @@ class CollagenViewerApp(tk.Tk):
             target=self._load_worker,
             args=(mask_folder, channel_folder, texture_folder, df_folder,
                   collagen_keywords, cell_keywords,
-                  position_keywords, radius_keywords, texture_keywords),
+                  position_keywords, radius_keywords, texture_keywords, R_keywords),
             daemon=True,
         )
         worker.start()
@@ -822,10 +891,11 @@ class CollagenViewerApp(tk.Tk):
 
     def _load_worker(self, mask_folder, channel_folder, texture_folder, df_folder,
                      collagen_keywords, cell_keywords,
-                     position_keywords, radius_keywords, texture_keywords):
+                     position_keywords, radius_keywords, texture_keywords, R_keywords):
+        
         try:
             grouped_df = build_long_dataframe(
-                df_folder, position_keywords=position_keywords, radii=radius_keywords, texture_keywords=texture_keywords
+                df_folder, position_keywords=position_keywords, radii=radius_keywords, texture_keywords=texture_keywords, R_keywords=R_keywords
             )
         except Exception as e:
             traceback.print_exc()
@@ -838,6 +908,7 @@ class CollagenViewerApp(tk.Tk):
                     "collagen": collagen_keywords,
                     "cell": cell_keywords,
                     "texture": texture_keywords,
+                    "neighbor3d": R_keywords
                 },
                 position_keywords=position_keywords,
                 radii=radius_keywords,
@@ -899,9 +970,16 @@ class CollagenViewerApp(tk.Tk):
         self.stat_combo.grid(row=0, column=5, padx=5)
         self.stat_combo.bind("<<ComboboxSelected>>", self._refresh_plots)
 
-        ttk.Label(controls, text="Cell(s):").grid(row=0, column=6, sticky="w", padx=(20, 0))
+        ttk.Label(controls, text="R:").grid(row=0, column=6, sticky="w", padx=(20, 0))
+        self.R_combo = ttk.Combobox(controls, textvariable=self.current_R,
+                                    values=[s.title() for s in self.R_keyword_var.get().split(",")],
+                                    state="readonly", width=10)
+        self.R_combo.grid(row=0, column=7, padx=5)
+        self.R_combo.bind("<<ComboboxSelected>>", self._on_R_change)
+
+        ttk.Label(controls, text="Cell(s):").grid(row=0, column=8, sticky="w", padx=(20, 0))
         cell_frame = ttk.Frame(controls)
-        cell_frame.grid(row=0, column=7, padx=5)
+        cell_frame.grid(row=0, column=9, padx=5)
         self.cell_listbox = tk.Listbox(cell_frame, selectmode="extended",
                                        height=4, exportselection=False, width=10)
         self.cell_listbox.pack(side="left")
@@ -915,10 +993,10 @@ class CollagenViewerApp(tk.Tk):
             controls, text="All cells", variable=self.all_cells_var,
             command=self._on_all_cells_toggle,
         )
-        self.all_cells_check.grid(row=0, column=8, padx=(10, 0))
+        self.all_cells_check.grid(row=0, column=11, padx=(10, 0))
 
         ttk.Button(controls, text="Change folders...", command=self._reset_folders).grid(
-            row=0, column=9, padx=(30, 0)
+            row=0, column=10, padx=(30, 0)
         )
 
         slider_frame = ttk.Frame(self.main_container, padding=(0, 4))
@@ -1032,6 +1110,10 @@ class CollagenViewerApp(tk.Tk):
         self._refresh_images()
         self._refresh_plots()
 
+    def _on_R_change(self, event=None):
+        self._refresh_images()
+        self._refresh_plots()
+
     def _on_all_cells_toggle(self):
         if self.all_cells_var.get():
             self.cell_listbox.selection_clear(0, tk.END)
@@ -1108,21 +1190,25 @@ class CollagenViewerApp(tk.Tk):
         return masks_by_radius
 
     def _refresh_images(self):
+        print("Refreshing images...")
         if not self.image_lib:
             return
         pos = self.current_pos.get()
         t = self.t_var.get()
         z = self.z_var.get()
         current_feature = self.current_feature.get()
+        current_R = self.current_R.get()
 
-        channel_overrides = {"texture": [current_feature] if current_feature else None}
+        texture_kw = [kw for kw in [current_feature, current_R] if kw]
+        channel_overrides = {"texture": texture_kw or None}
 
         selected_cells = self._get_selected_cells()
         masks_by_radius = self._build_masks(pos, t, z, selected_cells)
 
         imgs, norms, overlays = {}, {}, {}
         for ch in ("collagen", "cell", "texture"):
-            f = self.image_lib.find_channel_file(ch, pos, t, override_keywords=channel_overrides.get(ch))
+            print(f"Loading channel '{ch}' for position '{pos}', timepoint {t}, z-slice {z}..., R: {current_R}")
+            f = self.image_lib.find_channel_file(ch, pos, t, current_R, override_keywords=channel_overrides.get(ch), match_all = (ch=="texture"))
             img = None
             if f:
                 stack = self.image_lib.load_channel_stack(f)
@@ -1158,11 +1244,13 @@ class CollagenViewerApp(tk.Tk):
         pos = self.current_pos.get()
         feat = self.current_feature.get()
         stat = self.current_statistic.get().lower()
+        R = self.current_R.get()
 
         df_pos_feat = self.grouped_df[
             (self.grouped_df["position"] == pos) &
             (self.grouped_df["feature"] == feat) &
-            (self.grouped_df["statistic"] == stat)
+            (self.grouped_df["statistic"] == stat) &
+            (self.grouped_df["neighbor3d"] == R)
         ]
 
         self.fig_plot.clear()

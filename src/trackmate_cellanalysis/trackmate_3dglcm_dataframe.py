@@ -9,7 +9,31 @@ import itertools
 import re
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
-from config import PATHS, PARAMS
+from config import PATHS, PARAMS, MASK_RADII_UM
+
+
+def radius_tag(inner_radius_um, outer_radius_um):
+    """
+    Reproduce the exact folder/tag naming used by trackmate_shell_masks.py:
+        r{outer}um           for a solid sphere (inner_radius_um == 0)
+        r{inner}to{outer}um  for a shell/doughnut mask
+    """
+    if inner_radius_um and inner_radius_um > 0:
+        return f"r{int(inner_radius_um)}to{int(outer_radius_um)}um"
+    return f"r{int(outer_radius_um)}um"
+
+
+def build_mask_paths(pos, masks_root, shell_radii_um):
+    """
+    Build the {radius_tag: folder_path} dict for a given position from
+    config.MASK_RADII_UM, matching the per-cell mask folders written by
+    trackmate_shell_masks.py (masks3d_per_cell_{pos}_{radius_tag}).
+    """
+    mask_paths = {}
+    for inner_um, outer_um in shell_radii_um:
+        tag = radius_tag(inner_um, outer_um)
+        mask_paths[tag] = str(masks_root / f"masks3d_per_cell_{pos}_{tag}")
+    return mask_paths
 
 
 def reshape_texture(df):
@@ -110,7 +134,6 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
     #timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
     timepoint= int(re.search(r'CH00_(\d+)', nospace_name).group(1))-1
 
-    # Load masks
     # Load masks
     masks = {}
     for mask_name, folder_path in mask_paths_dict.items():
@@ -266,14 +289,8 @@ if __name__ == "__main__":
     for pos in PARAMS["stacks"]: 
         print(f"Processing position: {pos}")
 
-        mask_paths = {
-            #"r20":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r20um"),
-            #"r30":   str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r30um"),
-            #"r10": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r10um"),
-            "r200": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r200um"),
-            "r250": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r250um"),
-            "r350": str(PATHS["masks"] / f"masks3d_per_cell_{pos}_r350um"),
-        }
+        mask_paths = build_mask_paths(pos, PATHS["masks"], MASK_RADII_UM)
+
         dftexture3D = pd.concat([dftexture3D, process_img_folder(pos, str(PATHS["texture3d"]), mask_paths, is_3d=1)], ignore_index=True)
         
     dftexture3D = reshape_texture(dftexture3D)

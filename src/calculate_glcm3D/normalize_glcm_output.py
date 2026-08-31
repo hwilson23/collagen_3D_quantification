@@ -151,9 +151,10 @@ def stitch_sections(output_path, output_stitched_path):
 
 
 if __name__ == "__main__":
-    input_path = "G:\\UTSW_BJChang\\output_bksub_texture3D\\"
-    output_path = "G:\\UTSW_BJChang\\normalized\\"
-    output_stitched_path = "G:\\UTSW_BJChang\\stitched\\"
+    #input_path = "G:\\UTSW_BJChang\\output_bksub_texture3D\\"
+    input_path = "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\20260519_stained_analysis\\output_bksub_texture3D"
+    output_path = "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\20260519_stained_analysis\\output_bksub_texture3D\\normalized\\"
+    output_stitched_path = "G:\\FluorescentCollagen\\20260519_flucol_kpc_ows3\\20260519_stained_analysis\\output_bksub_texture3D\\stitched\\"
     print("Normalizing glcm output...")
     normalize_glcm_output(input_path, output_path)
     stitch_sections(output_path, output_stitched_path)
