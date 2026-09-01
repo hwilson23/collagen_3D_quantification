@@ -641,6 +641,7 @@ class CollagenViewerApp(tk.Tk):
         self.current_statistic = tk.StringVar(value="mean")
         self.current_R = tk.StringVar(value="R1")
         self.all_cells_var = tk.BooleanVar(value=False)
+        self.all_R_var = tk.BooleanVar(value=False)
         self.z_var = tk.IntVar(value=0)
         self.t_var = tk.IntVar(value=0)
         self.user_z = tk.IntVar(value=46)
@@ -972,14 +973,19 @@ class CollagenViewerApp(tk.Tk):
 
         ttk.Label(controls, text="R:").grid(row=0, column=6, sticky="w", padx=(20, 0))
         self.R_combo = ttk.Combobox(controls, textvariable=self.current_R,
-                                    values=[s.title() for s in self.R_keyword_var.get().split(",")],
                                     state="readonly", width=10)
         self.R_combo.grid(row=0, column=7, padx=5)
         self.R_combo.bind("<<ComboboxSelected>>", self._on_R_change)
 
-        ttk.Label(controls, text="Cell(s):").grid(row=0, column=8, sticky="w", padx=(20, 0))
+        self.all_R_check = ttk.Checkbutton(
+            controls, text="All R", variable=self.all_R_var,
+            command=self._on_all_R_toggle,
+        )
+        self.all_R_check.grid(row=0, column=7, padx=(80, 0))
+
+        ttk.Label(controls, text="Cell(s):").grid(row=0, column=9, sticky="w", padx=(20, 0))
         cell_frame = ttk.Frame(controls)
-        cell_frame.grid(row=0, column=9, padx=5)
+        cell_frame.grid(row=0, column=10, padx=5)
         self.cell_listbox = tk.Listbox(cell_frame, selectmode="extended",
                                        height=4, exportselection=False, width=10)
         self.cell_listbox.pack(side="left")
@@ -996,7 +1002,7 @@ class CollagenViewerApp(tk.Tk):
         self.all_cells_check.grid(row=0, column=11, padx=(10, 0))
 
         ttk.Button(controls, text="Change folders...", command=self._reset_folders).grid(
-            row=0, column=10, padx=(30, 0)
+            row=0, column=12, padx=(30, 0)
         )
 
         slider_frame = ttk.Frame(self.main_container, padding=(0, 4))
@@ -1081,8 +1087,16 @@ class CollagenViewerApp(tk.Tk):
             self.feature_combo["values"] = features
             if features:
                 self.feature_combo.current(0)
+        
+        if self.grouped_df is not None and "neighbor3d" in self.grouped_df.columns:
+            available = set(self.grouped_df["neighbor3d"].dropna().unique())
+            requested = parse_keyword_field(self.R_keyword_var.get())
+            R_values = [r for r in requested if r in available] or sorted(available)
+            self.R_combo["values"] = R_values
+            if R_values:
+                self.current_R.set(R_values[0])
 
-        self._on_position_change()
+                self._on_position_change()
 
     def _on_position_change(self, event=None):
         if not self.image_lib:
@@ -1118,6 +1132,10 @@ class CollagenViewerApp(tk.Tk):
         if self.all_cells_var.get():
             self.cell_listbox.selection_clear(0, tk.END)
         self._refresh_images()
+        self._refresh_plots()
+
+    def _on_all_R_toggle(self):
+        self.R_combo.config(state="disabled" if self.all_R_var.get() else "readonly")
         self._refresh_plots()
 
     def _on_scale_change(self, val, var, label):
@@ -1163,13 +1181,25 @@ class CollagenViewerApp(tk.Tk):
     def _get_selected_cells(self):
         if self.all_cells_var.get():
             return [self.cell_listbox.get(i) for i in range(self.cell_listbox.size())]
-
         sel_indices = self.cell_listbox.curselection()
         if not sel_indices:
             if self.cell_listbox.size() > 0:
                 return [self.cell_listbox.get(0)]
             return []
         return [self.cell_listbox.get(i) for i in sel_indices]
+
+    def _get_selected_R_values(self):
+        if self.grouped_df is not None and "neighbor3d" in self.grouped_df.columns:
+            available = set(self.grouped_df["neighbor3d"].dropna().unique())
+        else:
+            available = set()
+        requested = parse_keyword_field(self.R_keyword_var.get())
+        allowed = [r for r in requested if r in available] or sorted(available)
+
+        if self.all_R_var.get():
+            return allowed
+        current = self.current_R.get()
+        return [current] if current in allowed else allowed[:1]
 
     def _build_masks(self, pos, t, z, selected_cells):
         masks_by_radius = {}
@@ -1244,17 +1274,13 @@ class CollagenViewerApp(tk.Tk):
         pos = self.current_pos.get()
         feat = self.current_feature.get()
         stat = self.current_statistic.get().lower()
-        R = self.current_R.get()
-
-        print("current_R:", repr(R))
-        print("unique neighbor3d values:", self.grouped_df["neighbor3d"].unique())
-        print("unique dtypes:", self.grouped_df["neighbor3d"].dtype)
+        R_values = self._get_selected_R_values()
 
         df_pos_feat = self.grouped_df[
             (self.grouped_df["position"] == pos) &
             (self.grouped_df["feature"] == feat) &
             (self.grouped_df["statistic"] == stat) &
-            (self.grouped_df["neighbor3d"] == R)
+            (self.grouped_df["neighbor3d"].isin(R_values))
         ]
 
         self.fig_plot.clear()
@@ -1268,28 +1294,40 @@ class CollagenViewerApp(tk.Tk):
         if n_radii == 1:
             axes = [axes]
 
+        linestyles = ['-', '--', ':', '-.']
+        selected_cells = self._get_selected_cells()
+
         for idx, r in enumerate(self.radii):
             ax = axes[idx]
             df_r = df_pos_feat[df_pos_feat["mask_type"] == r]
 
-            if not df_r.empty and self._get_selected_cells():
-                for cell_id in self._get_selected_cells():
-                    df_cell = df_r[df_r["cell"] == str(cell_id)].sort_values("timepoint")
-                    if not df_cell.empty:
-                        ax.plot(
-                            df_cell["timepoint"],
-                            df_cell["value"],
-                            marker=".",
-                            linewidth=1.5,
-                            label=f"Cell {cell_id}"
-                        )
+            if not df_r.empty and selected_cells:
+                for r_idx, R_val in enumerate(R_values):
+                    df_R = df_r[df_r["neighbor3d"] == R_val]
+                    ls = linestyles[r_idx % len(linestyles)]
+                    for cell_id in selected_cells:
+                        df_cell = df_R[df_R["cell"] == str(cell_id)].sort_values("timepoint")
+                        if not df_cell.empty:
+                            label = f"Cell {cell_id}"
+                            if len(R_values) > 1:
+                                label += f" ({R_val})"
+                            ax.plot(
+                                df_cell["timepoint"],
+                                df_cell["value"],
+                                marker=".",
+                                linewidth=1.5,
+                                linestyle=ls,
+                                label=label,
+                            )
 
             ax.set_title(f"Radius: {r}", fontsize=10)
             ax.set_xlabel("Timepoint")
             if idx == 0:
                 ax.set_ylabel(feat, fontsize=9)
             ax.grid(True, linestyle=":", alpha=0.6)
-            if len(self._get_selected_cells()) > 1 and len(self._get_selected_cells()) <= 10:
+
+            n_lines = len(selected_cells) * max(1, len(R_values))
+            if 1 < n_lines <= 10:
                 ax.legend(fontsize="xx-small", loc="best")
 
         self.fig_plot.tight_layout()
