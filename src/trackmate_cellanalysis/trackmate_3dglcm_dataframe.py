@@ -185,7 +185,8 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
         # -----------------------------------
     for mask_type, cells in masks.items():
         for cell_num, data in cells.items():
-            current_mask = data["mask_stack"][:, :, z]
+            #current_mask = data["mask_stack"][:, :, z]
+            current_mask = data["mask_stack"]
             #masked_pixels = currentim[current_mask > 0]
             masked_pixels = img[current_mask > 0]
             stats = compute_stats(masked_pixels)
