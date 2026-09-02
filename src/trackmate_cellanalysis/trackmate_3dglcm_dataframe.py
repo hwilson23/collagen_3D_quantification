@@ -41,9 +41,6 @@ def reshape_texture(df):
     # regardless of mask_type/texture_type -- these should NOT be pivoted, just
     # kept as a single column.
     metadata_cols = [
-        "distance3d",
-        "neighbor3d",
-        "bin_num3d",
         "concentration",
         "type",
         "roi",
@@ -62,7 +59,7 @@ def reshape_texture(df):
     ]
     stat_cols = [col for col in stat_cols if col in df.columns]
 
-    index_cols = ["image_name", "slice", "position", "cell","timepoint"]
+    index_cols = ["image_name", "slice", "position", "cell","timepoint","distance3d","neighbor3d","bin_num3d"]
 
     if not stat_cols:
         return df
@@ -122,7 +119,7 @@ def compute_stats(pixels):
     }
 
 def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
-
+    
     nospace_name = os.path.basename(imagepath).replace(" ", "")
 
     img = tiff.imread(imagepath, out='memmap')
@@ -132,7 +129,7 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
     idx = nospace_name.find("3D")
     
     #timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
-    timepoint= int(re.search(r'CH00_(\d+)', nospace_name).group(1))-1
+    timepoint= int(re.search(r'CH01_(\d+)', nospace_name).group(1))-1
 
     # Load masks
     masks = {}
@@ -155,61 +152,63 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
                     'cell': cell_num
                 }
     #print(masks)
-    for z in range(img.shape[2]):
+    #for z in range(img.shape[2]):
         #print(f"Loading mask: {fname} for position: {pos} and mask type: {mask_name}, timepoint is {timepoint}, z is {z}, cell number is {re.search(r'cell_(\d+)', fname).group(1)}")
 
-        currentim = img[:, :, z]
+     #   currentim = img[:, :, z]
 
         # -----------------------------------
         # Whole image stats
         # -----------------------------------
-        stats = compute_stats(currentim)
+    #stats = compute_stats(currentim)
+    stats = compute_stats(img)
 
-        imgstats = {
-            "slice": z + 1,
-            "image_name": nospace_name[:idx-7],
-            #"timepoint": int(re.search(r'_t(\d+)', nospace_name).group(1))-1,
-            timepoint: int(re.search(r'CH00_(\d+)', nospace_name).group(1))-1,
-            "mask_type": "full",
-            "texture_type": nospace_name.split('_')[-6],
-            #"position": re.search(r'Pos(\d+)',pos).group(1),
-            "distance3d": nospace_name.split('_')[-4],
-            "neighbor3d": nospace_name.split('_')[-3],
-            "bin_num3d": nospace_name.split('_')[-2],
-            "cell": "full",
-            **stats
-        }
+    imgstats = {
+        #"slice": z + 1,
+        "image_name": nospace_name[:idx-7],
+        #"timepoint": int(re.search(r'_t(\d+)', nospace_name).group(1))-1,
+        "timepoint": int(re.search(r'CH01_(\d+)', nospace_name).group(1))-1,
+        "mask_type": "full",
+        "texture_type": nospace_name.split('_')[-6],
+        #"position": re.search(r'Pos(\d+)',pos).group(1),
+        "distance3d": nospace_name.split('_')[-4],
+        "neighbor3d": nospace_name.split('_')[-3],
+        "bin_num3d": nospace_name.split('_')[-2],
+        "cell": "full",
+        **stats
+    }
 
-        stackstats.append(imgstats)
+    stackstats.append(imgstats)
 
         # -----------------------------------
         # Masked stats
         # -----------------------------------
-        for mask_type, cells in masks.items():
-            for cell_num, data in cells.items():
-                current_mask = data["mask_stack"][:, :, z]
-                masked_pixels = currentim[current_mask > 0]
-                stats = compute_stats(masked_pixels)
+    for mask_type, cells in masks.items():
+        for cell_num, data in cells.items():
+            current_mask = data["mask_stack"][:, :, z]
+            #masked_pixels = currentim[current_mask > 0]
+            masked_pixels = img[current_mask > 0]
+            stats = compute_stats(masked_pixels)
 
-                if re.search(r'Pos(\d+)', pos) is not None:
-                    positiontag = re.search(r'Pos(\d+)', pos).group(1)
-                else:
-                    positiontag = ""
-                imgstats = {
-                    "slice": z + 1,
-                    "cell": data["cell"],
-                    "image_name": nospace_name[:idx-7],
-                    "timepoint": data["timepoint"],
-                    "mask_type": mask_type,
-                    "texture_type": nospace_name.split('_')[-6],
-                    "position": positiontag,
-                    "distance3d": nospace_name.split('_')[-4],
-                    "neighbor3d": nospace_name.split('_')[-3],
-                    "bin_num3d": nospace_name.split('_')[-2],
-                    **stats
-                }
+            if re.search(r'Pos(\d+)', pos) is not None:
+                positiontag = re.search(r'Pos(\d+)', pos).group(1)
+            else:
+                positiontag = ""
+            imgstats = {
+                #"slice": z + 1,
+                "cell": data["cell"],
+                "image_name": nospace_name[:idx-7],
+                "timepoint": data["timepoint"],
+                "mask_type": mask_type,
+                "texture_type": nospace_name.split('_')[-6],
+                "position": positiontag,
+                "distance3d": nospace_name.split('_')[-4],
+                "neighbor3d": nospace_name.split('_')[-3],
+                "bin_num3d": nospace_name.split('_')[-2],
+                **stats
+            }
 
-                stackstats.append(imgstats)
+            stackstats.append(imgstats)
             
 
     return stackstats
@@ -317,9 +316,9 @@ if __name__ == "__main__":
     for pos in unique_pos:
         pos_df = collapseddf[collapseddf['position'] == pos]
         
-        pos_df.to_csv(f"current_final_dataframe_byslice_pos_{pos}_3Dtrackmate.csv", index=False)
+        pos_df.to_csv(f"dataframe_wholemask_pos_{pos}_3Dtrackmate.csv", index=False)
         
         print("Saved position dataframes separately")
 
     # Also save the combined dataframe
-    collapseddf.to_csv("finalcollapsed_dataframe_byslice_trackmate.csv", index=False)
+    collapseddf.to_csv("finalcollapsed_dataframe_wholemask_trackmate.csv", index=False)
