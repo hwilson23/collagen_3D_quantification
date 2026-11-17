@@ -1,545 +1,501 @@
-%code derived from
-%https://github.com/Pedram-Parnianpour/VGLCM-TOP-3D-Texture-Analysis/tree/main 
-%https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0117759#sec003
+% ============================================================================
+% Windowed 3D GLCM texture pipeline — box-filter / two-pass version
+%
+% Replaces explicit per-voxel offset-index enumeration (OffsetsMatrixS/E)
+% and the dense per-voxel NL x NL co-occurrence array (GLCMS) with a
+% streaming two-pass box-filter approach. This decouples memory use from
+% BOTH the number of gray levels (NL) and the neighborhood radius (R),
+% so you can process the whole 512x512xZ volume at once (no sectioning)
+% and sweep NeighborSize in {1,3,5,7,...} without blowing up RAM.
+%
+% IMPORTANT DESIGN NOTE — window shape:
+%   The original code used a *spherical* neighborhood (round(sqrt(...))<=R,
+%   from ComputeOffsets). This version uses a *cubic* window of size
+%   (2R+1)^3 for the neighborhood, because a cube is separable and can be
+%   summed in O(1) per voxel via a 3D integral image (summed-volume table),
+%   regardless of R. This is what makes R=7 basically as cheap as R=1.
+%   If you need an exact spherical neighborhood, see the note at the
+%   bottom of computeWindowedGLCMFeatures() for how to swap in a
+%   convn()-based spherical kernel instead (more expensive, but still
+%   avoids the old index-array memory blowup).
+%
+% Memory scaling:
+%   Old approach:  O(numVoxels * NL^2)                for GLCMS
+%                  O(numVoxels * nOffsets(D) * nNeighbors(R)) for indices
+%   This approach: O(numVoxels * NL)                  for marginal accumulators
+%                  O(numVoxels) for box-filter intermediates (R-independent)
+% ============================================================================
 
-%user input — edit glcm_config.m to change paths or parameters
+%% ---------------------- user input ----------------------
+HOWMANYZ = 46;
+OPT.D               = 1;                   % distance for offset computation
+OPT.NeighborSizeList = [1 3 5 7];           % sweep multiple kernel radii
+OPT.quantLevel       = 8;                   % NL; bump this up as desired (e.g. 16, 32, 64)
+OPT.glcm_properties  = {'autoc','contr','corrm','corrp','cprom','cshad','dissi', ...
+                         'energ','entro','homom','homop','maxpr','sosvh','savgh', ...
+                         'svarh','senth','dvarh','denth','inf1h','inf2h','indnc','idmnc'};
 
-run(fullfile(fileparts(mfilename('fullpath')), 'glcm_config.m'));
-OPT.D              = CFG.D;
-OPT.NeighborSize   = CFG.NeighborSize;
-OPT.quantLevel     = CFG.quantLevel;
-OPT.glcm_properties = CFG.glcm_properties;
-OPT.HOWMANYZ = 168;
-folder  = CFG.folder_ep;
-outpath = CFG.outpath_ep;
+folder  = "/home/hwilson23/Documents/MATLAB_processing/maskapplied_timeseries_stacks";
+outpath = "/home/hwilson23/Documents/MATLAB_processing/output_bksub_texture3D";
 cd(folder)
-%load file
 
-
-time=1;
+time = 1;
 files = dir(fullfile(folder, '*.tif'));
 filenames = {files.name};
-%disp({files.name})
-%mask file
-fprintf('Starting Time: %s\n',datestr(now));
 
-setmin = [];
-setmax = [];
-%{
-for i=1:length(filenames)
-    for z = 1:HOWMANYZ
-        img = imread(fullfile(folder, filenames(i)), z);
-        mask = (img>0);
-        img = img(mask);
-        imgmin = min(img,[],'all');
-        imgmax = max(img,[],'all');
-       
-        setmax = max([setmax,imgmax]);
-        setmin = min([setmin,imgmin]);
-    end
-end
-fprintf('full dataset min/max (percentile): %f %f\n', setmin, setmax);
-%}
-histCounts = zeros(1, 65536);  % bins for intensity values 0-65535
+fprintf('Starting Time: %s\n', datestr(now));
 
+%% ---------------------- global intensity percentile range ----------------------
+histCounts = zeros(1, 65536);
 for i = 1:length(filenames)
     for z = 1:HOWMANYZ
-        img = imread(fullfile(folder, filenames(i)), z);
+        img = imread(fullfile(folder, filenames{i}), z);
         fg = img(img > 0);
         if isempty(fg), continue; end
-        counts = histcounts(double(fg), 0:65536);  % edges 0,1,...,65536
+        counts = histcounts(double(fg), 0:65536);
         histCounts = histCounts + counts;
     end
 end
-
-% compute percentile from cumulative histogram
 cdf = cumsum(histCounts) / sum(histCounts);
-globalLow  = find(cdf >= 0.005, 1, 'first') - 1;   % -1 to convert bin index back to intensity
+globalLow  = find(cdf >= 0.005, 1, 'first') - 1;
 globalHigh = find(cdf >= 0.995, 1, 'first') - 1;
-
 fprintf('full dataset percentile range: %d %d\n', globalLow, globalHigh);
-setmax = globalHigh;
 setmin = globalLow;
-p = ("continue? 1-yes/0-no");
-answerwas = input(p,"s")
+setmax = globalHigh;
+
+answerwas = input("continue? 1-yes/0-no", "s");
 if answerwas == "0"
-   return
+    return
 end
-    
 
-for i=1:length(filenames)
-    %for quadrant = 1:4
-    for section = 1:8
-    
+%% ---------------------- main loop: whole volume, no sectioning ----------------------
+for i = 1:length(filenames)
+
+    imgpg1 = imread(string(fullfile(folder, filenames{i})));
+    disp(filenames{i})
+    [numRows, numCols, ~] = size(imgpg1);
+    info = imfinfo(string(fullfile(folder, filenames{i})));
+    numPages = length(info); %#ok<NASGU>
+
+    volimg = zeros(numRows, numCols, HOWMANYZ, class(imgpg1));
+    startPage = (time - 1) * HOWMANYZ + 1;
+    for z = 1:HOWMANYZ
+        page = startPage + z - 1;
+        volimg(:,:,z) = imread(fullfile(folder, filenames{i}), page);
+    end
+
+    volimg = double(volimg);
+    disp(size(volimg))
+
+    mask = volimg > 0;
+
+    % crop to tissue bounding box (still valuable — cuts wasted work on
+    % empty background — but this is NOT the same as sectioning: no
+    % boundary truncation of neighborhoods happens here because we keep
+    % the full padded context via box filtering, see below)
+    [d1, d2, d3] = ind2sub(size(mask), find(mask));
+    InsideRange = [min(d1) max(d1); min(d2) max(d2); min(d3) max(d3)];
+    origsize = size(volimg);
+
+    cropMask = mask(InsideRange(1,1):InsideRange(1,2), InsideRange(2,1):InsideRange(2,2), InsideRange(3,1):InsideRange(3,2));
+    cropVol  = volimg(InsideRange(1,1):InsideRange(1,2), InsideRange(2,1):InsideRange(2,2), InsideRange(3,1):InsideRange(3,2));
+
+    [~, justname, ~] = fileparts(filenames{i});
+
+    for R = OPT.NeighborSizeList
+
         timerStart = tic;
-        imgpg1 = imread(string(fullfile(folder,filenames(i))));
-        disp(filenames(i))
-        [numRows, numCols, ~] = size(imgpg1);
-        
-        % Get the total number of pages
-        info = imfinfo(string(fullfile(folder,filenames(i)))); 
-        numPages = length(info);
-    
-        
-    
-        % Preallocate the 3D volume
-        
-        halfHeight = floor(numRows/2);
-        halfWidth  = floor(numCols/2);
-        halfHeight = floor(numRows/2);
-        quarterWidth = floor(numCols/4);
-        %volimg = zeros(halfHeight, halfWidth, numPages, class(imgpg1));
-        volimg = zeros(halfHeight, quarterWidth, numPages, class(imgpg1));
-        tempimg = zeros(numRows, numCols,HOWMANYZ);
-        % Read each page and store it in the 3D volume
-        
-        startPage = (time - 1) * HOWMANYZ + 1;
-        
-        % Iterate over z-slices for this time point
-        for z = 1:HOWMANYZ
-            page = startPage + z - 1; % 1-based page index
-            img = imread(fullfile(folder, filenames(i)), page);
-            tempimg(:,:,z) = img;
+        fprintf('Processing %s | NL=%d | R=%d\n', justname, OPT.quantLevel, R);
 
-            
-            %{
-            if quadrant == 1
-                % Top-left
-                volimg(:,:,z) = img(1:halfHeight, 1:halfWidth);
-        
-            elseif quadrant == 2
-                % Top-right
-                volimg(:,:,z) = img(1:halfHeight, halfWidth+1:end);
-        
-            elseif quadrant == 3
-                % Bottom-left
-                volimg(:,:,z) = img(halfHeight+1:end, 1:halfWidth);
-        
-            elseif quadrant == 4
-                % Bottom-right
-                volimg(:,:,z) = img(halfHeight+1:end, halfWidth+1:end);
-        
-            else
-                disp('quadrant error')
-            end
-            %}
-            
+        texture = computeWindowedGLCMFeatures(cropVol, cropMask, OPT.quantLevel, ...
+                        [setmin, setmax], OPT.D, R, OPT.glcm_properties);
 
-            if section == 1
-                volimg(:,:,z) = img(1:halfHeight, 1:quarterWidth);
+        fprintf('Total time (NL=%d, R=%d): %2.2f s\n', OPT.quantLevel, R, toc(timerStart));
 
-            elseif section == 2
-                volimg(:,:,z) = img(1:halfHeight, quarterWidth+1:2*quarterWidth);
+        for prop = 1:length(OPT.glcm_properties)
+            img = squeeze(texture(:,:,:,prop));
 
-            elseif section == 3
-                volimg(:,:,z) = img(1:halfHeight, 2*quarterWidth+1:3*quarterWidth);
-
-            elseif section == 4
-                volimg(:,:,z) = img(1:halfHeight, 3*quarterWidth+1:end);
-
-            elseif section == 5
-                volimg(:,:,z) = img(halfHeight+1:end, 1:quarterWidth);
-
-            elseif section == 6
-                volimg(:,:,z) = img(halfHeight+1:end, quarterWidth+1:2*quarterWidth);
-
-            elseif section == 7
-                volimg(:,:,z) = img(halfHeight+1:end, 2*quarterWidth+1:3*quarterWidth);
-
-            elseif section == 8
-                volimg(:,:,z) = img(halfHeight+1:end, 3*quarterWidth+1:end);
-
-            else
-                disp('section error')
-            end
-        end
-        
-        volimg = double(volimg);
-        disp(size(volimg))
-    
-        %createmask (assuming mask preapplied to image)
-        mask = volimg;
-        mask(mask>0) = 1;
-        mask = logical(mask);
-    
-        [d1,d2,d3] = ind2sub(size(mask), find(mask));
-        InsideRange = [min(d1) max(d1);min(d2) max(d2);min(d3) max(d3)];
-        origsize = size(volimg);
-        partialmask = mask(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2));
-        volimg = volimg(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2));
-        %disp(unique(volimg));
-        [~,justname,~] = fileparts(filenames(i));
-        %glcmFile = fullfile(outpath,string([char(justname) '_quad' num2str(quadrant) '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.mat'])); 
-        glcmFile = fullfile(outpath,string([char(justname) '_sect' num2str(section) '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.mat'])); 
-        
-        disp('gclmfile')
-        disp(glcmFile)
-        
-        if (exist(string(glcmFile), 'file') == 2)
-            GLCMS = load(glcmFile);
-            GLCMS = GLCMS.GLCMS;
-        else
-            GLCMS = CreateGLCM_Local(volimg,OPT.quantLevel,[setmin,setmax],OPT.D,OPT.NeighborSize,partialmask); 
-            m = matfile(glcmFile,'writable', true);
-            m.GLCMS = GLCMS;
-        end
-        texture = computeGLCMLocalFeat(GLCMS,partialmask,OPT.glcm_properties);        
-        time_total = toc(timerStart);
-        fprintf('Total time: %2.2f\n',time_total);
-         
-        for prop=1:length(OPT.glcm_properties)
-            img = squeeze(texture(:,:,:,prop)); 
-            img = (img-min(img(:))); %shift to not negative
-            img = img/max(img(:))*65535;
-            %disp(unique(img))
-            %disp(unique(img))
             fullimg = zeros(origsize);
-            fullimg(InsideRange(1,1):InsideRange(1,2),InsideRange(2,1):InsideRange(2,2),InsideRange(3,1):InsideRange(3,2)) = img;
-            %fullimg(double(mask)==0) = 0;
-            %fullimg = uint16(fullimg); %scaling to make sure small values not wiped
-            %TextureFileName  = [justname '_quad' num2str(quadrant) '_t' num2str(time) '_' OPT.glcm_properties{prop} '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.tif'];
-            TextureFileName  = [justname '_sect' num2str(section) '_t' num2str(time) '_' OPT.glcm_properties{prop} '_3D_D' num2str(OPT.D) '_N' num2str(OPT.NeighborSize) '_Q' num2str(OPT.quantLevel) '.tif'];
-            
-            for a = 1:length(img(1,1,:))
+            fullimg(InsideRange(1,1):InsideRange(1,2), InsideRange(2,1):InsideRange(2,2), InsideRange(3,1):InsideRange(3,2)) = img;
+            fullimg = single(fullimg);
+
+            TextureFileName = sprintf('%s_t%d_%s_3D_D%d_R%d_Q%d_raw.tif', ...
+                justname, time, OPT.glcm_properties{prop}, OPT.D, R, OPT.quantLevel);
+            fullFilePath = fullfile(outpath, TextureFileName);
+
+            t = Tiff(char(fullFilePath), 'w');
+            for a = 1:size(fullimg,3)
                 slice = fullimg(:,:,a);
-                if a ==1
-                    imwrite(uint16(slice),fullfile(outpath,join(TextureFileName)));
-                else
-                    imwrite(uint16(slice),fullfile(outpath,join(TextureFileName)),'WriteMode','append')
-                
+                tagstruct.ImageLength = size(slice,1);
+                tagstruct.ImageWidth  = size(slice,2);
+                tagstruct.Photometric = Tiff.Photometric.MinIsBlack;
+                tagstruct.BitsPerSample = 32;
+                tagstruct.SamplesPerPixel = 1;
+                tagstruct.SampleFormat = Tiff.SampleFormat.IEEEFP;
+                tagstruct.RowsPerStrip = size(slice,1);
+                tagstruct.PlanarConfiguration = Tiff.PlanarConfiguration.Chunky;
+                t.setTag(tagstruct);
+                t.write(slice);
+                if a < size(fullimg,3)
+                    t.writeDirectory();
                 end
             end
-            
-            
+            t.close();
         end
     end
-        disp("files saved!")
-end    
+    disp("file saved!")
+end
+
+disp("all done");
+fprintf('End Time: %s\n', datestr(now));
 
 
-
-disp("saving files");
-%delete(gcp('nocreate'));
-
-fprintf('End Time: %s\n',datestr(now));
-
-
-
+% ============================================================================
 function offset = ComputeOffsets(dis)
     [delta1,delta2,delta3] = ndgrid(-dis:dis,-dis:dis,-dis:dis);
     inside = round(sqrt(delta1.*delta1+delta2.*delta2+delta3.*delta3))<=dis;
     offset = [delta1(inside(:)),delta2(inside(:)),delta3(inside(:))];
     offset(offset(:,1)==0&offset(:,2)==0&offset(:,3)==0,:) = [];
-    % For symmetric glcm we need half of offsets
-    % offset = offset(1:size(offset,1)/2,:);
 end
 
-function texture = computeGLCMLocalFeat(glcm,mask,GLCM_feat)
-texture = zeros(size(glcm,1),size(glcm,2),size(glcm,3),length(GLCM_feat),'single');
-fprintf('Computing Features: ')
-[vi, vj, vk] = ind2sub(size(mask),find(mask));
-nVoxels = length(vi);
-featresults = zeros(nVoxels, length(GLCM_feat),'double');
 
-parfor v = 1:nVoxels
-    
-    glcm_norm = squeeze(glcm(vi(v),vj(v),vk(v),:,:));
-    featresults(v,:) = computeFeature(glcm_norm, GLCM_feat);
+% ============================================================================
+function out = boxFilter3(in, R)
+% Sum of `in` over a cubic window of radius R centered at every voxel,
+% zero-padded outside the volume. O(numVoxels) regardless of R via a 3D
+% summed-volume table (integral image). `in` should be numeric (single).
+    win = 2*R + 1;
+    in = single(in);
+    P = padarray(in, [R R R], 0, 'both');
+    C = cumsum(cumsum(cumsum(P,1),2),3);
+    S = padarray(C, [1 1 1], 0, 'pre');
+
+    sz = size(in);
+    r_lo = (1:sz(1));        r_hi = r_lo + win;
+    c_lo = (1:sz(2));        c_hi = c_lo + win;
+    p_lo = (1:sz(3));        p_hi = p_lo + win;
+
+    out = S(r_hi,c_hi,p_hi) - S(r_lo,c_hi,p_hi) - S(r_hi,c_lo,p_hi) - S(r_hi,c_hi,p_lo) ...
+        + S(r_lo,c_lo,p_hi) + S(r_lo,c_hi,p_lo) + S(r_hi,c_lo,p_lo) - S(r_lo,c_lo,p_lo);
 end
-% Build linear indices for the first 3 dims
-linIdx = sub2ind(size(texture(:,:,:,1)), vi, vj, vk);  % [nVoxels x 1]
 
-% Vectorized write across all features at once
-nFeats = length(GLCM_feat);
-nTotal = numel(texture(:,:,:,1));
 
-% Expand linear indices across feature dimension
-allIdx = linIdx + nTotal * (0:nFeats-1);  % [nVoxels x nFeats]
-
-texture(allIdx) = featresults;  % single vectorized assignment
-%{
-for v = 1:nVoxels
-    texture(vi(v),vj(v),vk(v),:) = featresults(v,:);
-end
-%}
-
-%%old version for gpu/regular cpu converting - without allocation for
-%%parfor
-%{
-for i=1:size(glcm,1)
-    for j=1:size(glcm,2)
-        for k=1:size(glcm,3)
-            if(mask(i,j,k)==0)
-                continue;
-            end
-            glcm_norm = gpuArray(squeeze(glcm(i,j,k,:,:)));            
-            st = computeFeature(glcm_norm,GLCM_feat); 
-            texture(i,j,k,:) = st;
-            
+% ============================================================================
+function out = shiftVolume(vol, offset, fillVal)
+% Shift `vol` by integer offset [dy dx dz], filling out-of-bounds voxels
+% with fillVal. Equivalent to "vol sampled at pos+offset", zero outside.
+    sz = size(vol);
+    if islogical(vol)
+        out = false(sz);
+    else
+        out = cast(zeros(sz), 'like', vol);
+        if fillVal ~= 0
+            out(:) = fillVal;
         end
     end
-    fprintf(repmat('\b',1,n));
-    msg = sprintf('%2.2f',i/size(glcm,1)*100);
-    disp([msg '%%']);
-    n=numel(msg)+1;                    
+    r = 1:sz(1); c = 1:sz(2); p = 1:sz(3);
+    rs = r + offset(1); cs = c + offset(2); ps = p + offset(3);
+    validR = rs>=1 & rs<=sz(1);
+    validC = cs>=1 & cs<=sz(2);
+    validP = ps>=1 & ps<=sz(3);
+    out(validR,validC,validP) = vol(rs(validR), cs(validC), ps(validP));
 end
-%}
 
-disp("done with compute fetures")
-end
-%{
-function texture = computeGLCMLocalFeat(glcm,mask,GLCM_feat)
-texture = zeros(size(glcm,1),size(glcm,2),size(glcm,3),length(GLCM_feat),'single');
-fprintf('Computing Features: ')
-n=0;
-for i=1:size(glcm,1)
-    for j=1:size(glcm,2)
-        for k=1:size(glcm,3)
-            if(mask(i,j,k)==0)
-                continue;
+
+% ============================================================================
+function texture = computeWindowedGLCMFeatures(vol, mask, NL, GL, D, R, GLCM_feat)
+% Two-pass streaming windowed-GLCM feature computation.
+%
+% Pass 1: build per-voxel marginals (p_x, p_y, p_{x+y}, p_{x-y}, total
+%         neighbor-pair count) by looping over all NL^2 gray-level pairs,
+%         but only ACCUMULATING into O(NL) marginal volumes — the joint
+%         count for each pair is discarded immediately after use.
+% Pass 2: recompute the same NL^2 joint counts (cheap — box filtering is
+%         R-independent) and accumulate each requested texture feature
+%         directly, using the per-voxel scalars derived from pass 1
+%         (u_x, u_y, s_x, s_y, hx, hy) as weights.
+%
+% Recomputing the joint twice trades a bit of extra compute for avoiding
+% ever storing an NL^2-sized array per voxel.
+
+    sz = size(vol);
+    nVox = numel(vol);
+
+    % ---- quantize intensities into NL gray levels ----
+    if GL(2) == GL(1)
+        SI = ones(sz);
+    else
+        slope = (NL-1) / (GL(2)-GL(1));
+        intercept = 1 - slope*GL(1);
+        SI = round(vol.*slope + intercept);
+    end
+    SI(SI > NL) = NL;
+    SI(SI < 1)  = 1;
+    if NL <= 255
+        SI = uint8(SI);
+    else
+        SI = uint16(SI);
+    end
+    mask = logical(mask);
+
+    % ---- precompute shifted SI / mask / validity for each distance offset ----
+    offsets = ComputeOffsets(D);
+    nOffsets = size(offsets,1);
+
+    SI_shift   = cell(nOffsets,1);
+    valid_d    = cell(nOffsets,1);
+    for d = 1:nOffsets
+        SI_shift{d} = shiftVolume(SI, offsets(d,:), 0);
+        mask_shift  = shiftVolume(mask, offsets(d,:), false);
+        valid_d{d}  = mask & mask_shift;   % both endpoints inside tissue+volume
+    end
+
+    % ---- total valid (offset,neighbor) pair count per voxel ----
+    validSum = zeros(sz, 'single');
+    for d = 1:nOffsets
+        validSum = validSum + single(valid_d{d});
+    end
+    total = boxFilter3(validSum, R);
+    totalSafe = total;
+    totalSafe(totalSafe == 0) = NaN;   % avoid div-by-zero; results masked out below
+
+    % ---- PASS 1: marginals ----
+    p_x  = cell(NL,1);            % row marginal, indexed by i
+    p_y  = cell(NL,1);            % column marginal, indexed by j
+    for k = 1:NL
+        p_x{k} = zeros(sz,'single');
+        p_y{k} = zeros(sz,'single');
+    end
+    p_xplusy  = cell(2*NL-1,1);   % indexed by k = i+j-1
+    for k = 1:(2*NL-1)
+        p_xplusy{k} = zeros(sz,'single');
+    end
+    p_xminusy = cell(NL,1);       % indexed by k = |i-j|+1
+    for k = 1:NL
+        p_xminusy{k} = zeros(sz,'single');
+    end
+
+    for gi = 1:NL
+        for gj = 1:NL
+            jointSum = zeros(sz,'single');
+            for d = 1:nOffsets
+                jointSum = jointSum + single(valid_d{d} & (SI==gi) & (SI_shift{d}==gj));
             end
-            glcm_norm = squeeze(glcm(i,j,k,:,:));            
-            st = computeFeature(glcm_norm,GLCM_feat); 
-            texture(i,j,k,:) = st;
-            
+            localCount = boxFilter3(jointSum, R);
+
+            p_x{gi} = p_x{gi} + localCount;
+            p_y{gj} = p_y{gj} + localCount;
+            k1 = gi + gj - 1;
+            k2 = abs(gi - gj) + 1;
+            p_xplusy{k1}  = p_xplusy{k1}  + localCount;
+            p_xminusy{k2} = p_xminusy{k2} + localCount;
         end
     end
-    fprintf(repmat('\b',1,n));
-    msg = sprintf('%2.2f',i/size(glcm,1)*100);
-    fprintf([msg '%%']);
-    n=numel(msg)+1;                    
-end
-fprintf('\n');
-end
-%}
-function feature = computeFeature(glcm,GLCM_feat_all)
-    feature = zeros(length(GLCM_feat_all),1);
-    size_glcm_1 = size(glcm,1); 
-    size_glcm_2 = size(glcm,2); 
-    Pij = glcm;
-    [i,j] = meshgrid(1:size_glcm_1,1:size_glcm_2); 
-    p_x = squeeze(sum(Pij,2)); 
-    p_y = squeeze(sum(Pij,1))'; 
-    glcm_mean = mean(Pij(:)); 
-    idx1 = (i+j)-1; 
-    p_xplusy = zeros((2*size_glcm_1 - 1),1);
-    for aux = 1:max(idx1(:)) 
-        p_xplusy(aux) = sum(Pij(idx1==aux)); 
-    end 
-    ii = (1:(2*size_glcm_1-1))'; 
-    jj = (0:size_glcm_1-1)';
-    idx2 = abs(i-j)+1; 
-    p_xminusy = zeros((size_glcm_1),1);
-    for aux = 1:max(idx2(:)) 
-        p_xminusy(aux) = sum(Pij(idx2==aux)); 
-    end 
-    u_x = sum(sum(i.*Pij)); 
-    u_y = sum(sum(j.*Pij));     
-    s_x = sum(sum(Pij.*((i-u_x).*(i-u_x))))^0.5; 
-    s_y = sum(sum(Pij.*((j-u_y).*(j-u_y))))^0.5; 
-    
-    for prop=1:length(GLCM_feat_all)
-        GLCM_feat = GLCM_feat_all{prop};
-        switch GLCM_feat
-        % Autocorrelation
-            case 'autoc'    
-                feature(prop) = sum(sum(Pij.*(i.*j))); 
-        % Contrast 
-            case'contr'
-                feature(prop) = sum(sum((abs(i-j).^2).*Pij)); 
-        % Dissimilarity 
-            case 'dissi'
-                feature(prop) = sum(sum(abs(i-j).*Pij)); 
-        % Energy 
-            case 'energ' 
-                feature(prop) = sum(sum(Pij.*Pij)); 
-        % Entropy 
-            case 'entro'
-                feature(prop) = -sum(sum(Pij.*log(Pij+eps))); 
-        % Homogeneity Matlab 
-            case 'homom'
-                feature(prop) =  sum(sum(Pij./(1+abs(i-j)))); 
-        % Homogeneity Paper 
-            case 'homop'
-                feature(prop) = sum(sum(Pij./(1+abs(i-j).^2))); 
-        % Sum of squares: Variance 
-            case 'sosvh'
-                feature(prop) = sum(sum(Pij.*((j-glcm_mean).*(j-glcm_mean)))); 
-        % Inverse difference normalized 
-            case 'indnc'
-                feature(prop) = sum(sum(Pij./(1+(abs(i-j)./size_glcm_1)))); 
-        % Inverse difference moment normalized 
-            case 'idmnc'
-                feature(prop) = sum(sum(Pij./(1+((i-j)./size_glcm_1).^2))); 
-        % Maximum probability 
-            case 'maxpr'
-                feature(prop) = max(Pij(:)); 
-        % Sum average 
-            case 'savgh'
-                feature(prop) = sum((ii+1).*p_xplusy); 
-        % Sum entropy 
-            case 'senth'
-                feature(prop) = -sum(p_xplusy.*log(p_xplusy+eps));     
-        % Sum variance 
-            case 'svarh'
-                senth = -sum(p_xplusy.*log(p_xplusy+eps)); 
-                feature(prop) = sum((((ii+1) - senth).^2).*p_xplusy); 
-        % Difference entropy 
-            case 'denth'
-            feature(prop) = -sum(p_xminusy.*log(p_xminusy+eps)); 
-        % Difference variance 
-            case 'dvarh'
-                feature(prop) = sum((jj.*jj).*p_xminusy); 
-        % Correlation Matlab     
-            case 'corrm'
-                corm = sum(sum(Pij.*(i-u_x).*(j-u_y))); 
-                feature(prop) = corm/(s_x*s_y); 
-        % Correlation paper 
-            case 'corrp'
-                corp = sum(sum(Pij.*(i.*j))); 
-                feature(prop) = (corp-u_x*u_y)/(s_x*s_y); 
-        % Cluster Prominence 
-            case 'cprom' 
-                feature(prop) = sum(sum(Pij.*((i+j-u_x-u_y).^4))); 
-        % Cluster Shade    
-            case 'cshad'
-                feature(prop) = sum(sum(Pij.*((i+j-u_x-u_y).^3)));   
-        % Information measure of correlation 1 
-            case 'inf1h'
-                hx = -sum(p_x.*log(p_x+eps)); 
-                hy = -sum(p_y.*log(p_y+eps)); 
-                hxy = -sum(sum(Pij.*log(Pij+eps))); 
-                hxy1 = -sum(sum(Pij.*log(p_x*p_y' + eps))); 
-                feature(prop) = (hxy-hxy1)/(max([hx,hy])); 
-        % Information measure of correlation 2
-            case 'inf2h'
-                hxy = -sum(sum(Pij.*log(Pij+eps))); 
-                hxy2 = -sum(sum((p_x*p_y').*log(p_x*p_y' + eps))); 
-                feature(prop) = (1-exp(-2*(hxy2-hxy)))^0.5;     
-        end  
+    clear jointSum localCount valid_d validSum
+
+    % ---- derived per-voxel scalars from marginals only ----
+    u_x = zeros(sz,'single'); u_y = zeros(sz,'single');
+    for gi = 1:NL, u_x = u_x + gi .* (p_x{gi} ./ totalSafe); end
+    for gj = 1:NL, u_y = u_y + gj .* (p_y{gj} ./ totalSafe); end
+
+    s_x2 = zeros(sz,'single'); s_y2 = zeros(sz,'single');
+    for gi = 1:NL, s_x2 = s_x2 + ((gi-u_x).^2) .* (p_x{gi} ./ totalSafe); end
+    for gj = 1:NL, s_y2 = s_y2 + ((gj-u_y).^2) .* (p_y{gj} ./ totalSafe); end
+    s_x = sqrt(s_x2); s_y = sqrt(s_y2);
+
+    hx = zeros(sz,'single'); hy = zeros(sz,'single');
+    for gi = 1:NL
+        px = p_x{gi} ./ totalSafe;
+        hx = hx - px .* log(px + eps);
     end
-    feature(isnan(feature)) = 0;
-    feature(isinf(feature)) = 0;
-end
-
-%--------------------------------------------------------------------------
-function [GLCMS] = CreateGLCM_Local(I, NL, GL,D,NeighborSizeRad,mask)
-if GL(2) == GL(1)
-    SI = ones(size(I));
-else
-    slope = (NL-1) / (GL(2) - GL(1));
-    intercept = 1 - (slope*(GL(1)));
-    SI = round(imlincomb(slope,I,intercept,'double'));
-end
-SI(SI > NL) = NL;
-SI(SI < 1) = 1;
-vol_Gray = single(SI);
-SIZ = size(I);
-clear I SI;
-
-[OffsetsMatrixS, OffsetsMatrixE] = AllOffsetsAllNeighbors(vol_Gray,D,NeighborSizeRad,mask);
-InsideMask = OffsetsMatrixS>0&OffsetsMatrixE>0;
-disp("InsideMask");
-disp(size(InsideMask));
-glcm = zeros(length(InsideMask),NL,NL,'single');
-fprintf('Computing GLCM: ')
-n=0;
-
-% Pre-allocate glcm_temp as a cell array to avoid slice issues
-glcm_temp = cell(NL, 1);
-parfor i = 1:NL
-    glcm_i = zeros(size(glcm, 1), NL);  % temp storage for this i-slice
-    
-    for j = 1:NL
-        G = zeros(size(InsideMask), 'uint8');
-        G(InsideMask) = vol_Gray(OffsetsMatrixS(InsideMask)) == i & ...
-                        vol_Gray(OffsetsMatrixE(InsideMask)) == j;
-        glcm_i(:, j) = sum(sum(G, 3), 2);
+    for gj = 1:NL
+        py = p_y{gj} ./ totalSafe;
+        hy = hy - py .* log(py + eps);
     end
-    
-    glcm_temp{i} = glcm_i;
+
+    % hxy2 depends only on marginals — compute now, no joint needed
+    hxy2 = zeros(sz,'single');
+    pxProb = cell(NL,1); pyProb = cell(NL,1);
+    for gi = 1:NL, pxProb{gi} = p_x{gi} ./ totalSafe; end
+    for gj = 1:NL, pyProb{gj} = p_y{gj} ./ totalSafe; end
+    for gi = 1:NL
+        for gj = 1:NL
+            pxpy = pxProb{gi} .* pyProb{gj};
+            hxy2 = hxy2 - pxpy .* log(pxpy + eps);
+        end
+    end
+
+    % sum-average / sum-entropy / sum-variance / diff-entropy / diff-variance
+    % (all purely marginal — matches original computeFeature.m definitions,
+    % including its use of raw index (not (index-mean)) for dvarh)
+    ii = (1:(2*NL-1))';
+    jj = (0:NL-1)';
+    savgh = zeros(sz,'single'); senth = zeros(sz,'single');
+    for k = 1:(2*NL-1)
+        pxy = p_xplusy{k} ./ totalSafe;
+        savgh = savgh + (ii(k)+1) .* pxy;
+        senth = senth - pxy .* log(pxy + eps);
+    end
+    svarh = zeros(sz,'single');
+    for k = 1:(2*NL-1)
+        pxy = p_xplusy{k} ./ totalSafe;
+        svarh = svarh + (((ii(k)+1) - senth).^2) .* pxy;
+    end
+    denth = zeros(sz,'single'); dvarh = zeros(sz,'single');
+    for k = 1:NL
+        pxmy = p_xminusy{k} ./ totalSafe;
+        denth = denth - pxmy .* log(pxmy + eps);
+        dvarh = dvarh + (jj(k).*jj(k)) .* pxmy;
+    end
+
+    clear p_x p_y p_xplusy p_xminusy
+
+    % glcm_mean = mean(Pij(:)) over an NL x NL matrix that sums to 1 --
+    % this is a voxel-independent constant, 1/NL^2 (matches original code)
+    glcm_mean = 1/(NL*NL);
+
+    % ---- figure out which features need a second joint pass ----
+    marginalOnly = {'savgh','senth','svarh','denth','dvarh'};
+    needsJoint = ~all(ismember(GLCM_feat, marginalOnly));
+
+    nFeat = length(GLCM_feat);
+    texture = zeros([sz nFeat], 'single');
+    featIdx = containers.Map(GLCM_feat, num2cell(1:nFeat));
+
+    if isKey2(featIdx,'savgh'), texture(:,:,:,featIdx('savgh')) = savgh; end
+    if isKey2(featIdx,'senth'), texture(:,:,:,featIdx('senth')) = senth; end
+    if isKey2(featIdx,'svarh'), texture(:,:,:,featIdx('svarh')) = svarh; end
+    if isKey2(featIdx,'denth'), texture(:,:,:,featIdx('denth')) = denth; end
+    if isKey2(featIdx,'dvarh'), texture(:,:,:,featIdx('dvarh')) = dvarh; end
+
+    maskExpanded = repmat(mask, [1 1 1 nFeat]);
+    texture(~maskExpanded) = 0;
+
+    if ~needsJoint
+        return
+    end
+
+    % ---- PASS 2: joint-dependent features ----
+    % re-derive shifted volumes / validity (cheap; avoids holding them
+    % across the whole pass-1 marginal accumulation above)
+    SI_shift = cell(nOffsets,1);
+    valid_d  = cell(nOffsets,1);
+    for d = 1:nOffsets
+        SI_shift{d} = shiftVolume(SI, offsets(d,:), 0);
+        mask_shift  = shiftVolume(mask, offsets(d,:), false);
+        valid_d{d}  = mask & mask_shift;
+    end
+
+    accum = struct();
+    accNames = {'autoc','contr','dissi','energ','entro','homom','homop','sosvh', ...
+                'indnc','idmnc','maxpr','corrm_num','cprom','cshad','hxy1'};
+    for a = 1:length(accNames)
+        accum.(accNames{a}) = zeros(sz,'single');
+    end
+    maxpr_acc = zeros(sz,'single');
+
+    for gi = 1:NL
+        for gj = 1:NL
+            jointSum = zeros(sz,'single');
+            for d = 1:nOffsets
+                jointSum = jointSum + single(valid_d{d} & (SI==gi) & (SI_shift{d}==gj));
+            end
+            localCount = boxFilter3(jointSum, R);
+            Pij = localCount ./ totalSafe;
+            Pij(isnan(Pij)) = 0;
+
+            dij = gi - gj;
+
+            if isKey2(featIdx,'autoc') || isKey2(featIdx,'corrp')
+                accum.autoc = accum.autoc + Pij .* (gi*gj);
+            end
+            if isKey2(featIdx,'contr')
+                accum.contr = accum.contr + Pij .* (dij^2);
+            end
+            if isKey2(featIdx,'dissi')
+                accum.dissi = accum.dissi + Pij .* abs(dij);
+            end
+            if isKey2(featIdx,'energ')
+                accum.energ = accum.energ + Pij.^2;
+            end
+            if isKey2(featIdx,'entro') || isKey2(featIdx,'inf1h') || isKey2(featIdx,'inf2h')
+                accum.entro = accum.entro - Pij .* log(Pij + eps);
+            end
+            if isKey2(featIdx,'homom')
+                accum.homom = accum.homom + Pij ./ (1 + abs(dij));
+            end
+            if isKey2(featIdx,'homop')
+                accum.homop = accum.homop + Pij ./ (1 + dij^2);
+            end
+            if isKey2(featIdx,'sosvh')
+                accum.sosvh = accum.sosvh + Pij .* ((gj - glcm_mean).^2);
+            end
+            if isKey2(featIdx,'indnc')
+                accum.indnc = accum.indnc + Pij ./ (1 + abs(dij)/NL);
+            end
+            if isKey2(featIdx,'idmnc')
+                accum.idmnc = accum.idmnc + Pij ./ (1 + (dij/NL)^2);
+            end
+            if isKey2(featIdx,'maxpr')
+                maxpr_acc = max(maxpr_acc, Pij);
+            end
+            if isKey2(featIdx,'corrm')
+                accum.corrm_num = accum.corrm_num + Pij .* (gi-u_x) .* (gj-u_y);
+            end
+            if isKey2(featIdx,'cprom')
+                accum.cprom = accum.cprom + Pij .* ((gi+gj-u_x-u_y).^4);
+            end
+            if isKey2(featIdx,'cshad')
+                accum.cshad = accum.cshad + Pij .* ((gi+gj-u_x-u_y).^3);
+            end
+            if isKey2(featIdx,'inf1h')
+                pxpy_ij = pxProb{gi} .* pyProb{gj};
+                accum.hxy1 = accum.hxy1 - Pij .* log(pxpy_ij + eps);
+            end
+        end
+    end
+    clear pxProb pyProb
+
+    if isKey2(featIdx,'autoc'), texture(:,:,:,featIdx('autoc')) = accum.autoc; end
+    if isKey2(featIdx,'contr'), texture(:,:,:,featIdx('contr')) = accum.contr; end
+    if isKey2(featIdx,'dissi'), texture(:,:,:,featIdx('dissi')) = accum.dissi; end
+    if isKey2(featIdx,'energ'), texture(:,:,:,featIdx('energ')) = accum.energ; end
+    if isKey2(featIdx,'entro'), texture(:,:,:,featIdx('entro')) = accum.entro; end
+    if isKey2(featIdx,'homom'), texture(:,:,:,featIdx('homom')) = accum.homom; end
+    if isKey2(featIdx,'homop'), texture(:,:,:,featIdx('homop')) = accum.homop; end
+    if isKey2(featIdx,'sosvh'), texture(:,:,:,featIdx('sosvh')) = accum.sosvh; end
+    if isKey2(featIdx,'indnc'), texture(:,:,:,featIdx('indnc')) = accum.indnc; end
+    if isKey2(featIdx,'idmnc'), texture(:,:,:,featIdx('idmnc')) = accum.idmnc; end
+    if isKey2(featIdx,'maxpr'), texture(:,:,:,featIdx('maxpr')) = maxpr_acc; end
+    if isKey2(featIdx,'corrm')
+        texture(:,:,:,featIdx('corrm')) = accum.corrm_num ./ (s_x .* s_y);
+    end
+    if isKey2(featIdx,'corrp')
+        texture(:,:,:,featIdx('corrp')) = (accum.autoc - u_x.*u_y) ./ (s_x .* s_y);
+    end
+    if isKey2(featIdx,'cprom'), texture(:,:,:,featIdx('cprom')) = accum.cprom; end
+    if isKey2(featIdx,'cshad'), texture(:,:,:,featIdx('cshad')) = accum.cshad; end
+    if isKey2(featIdx,'inf1h')
+        texture(:,:,:,featIdx('inf1h')) = (accum.entro - accum.hxy1) ./ max(hx,hy);
+    end
+    if isKey2(featIdx,'inf2h')
+        val = sqrt(max(0, 1 - exp(-2*(hxy2 - accum.entro))));
+        texture(:,:,:,featIdx('inf2h')) = val;
+    end
+
+    texture(isnan(texture)) = 0;
+    texture(isinf(texture)) = 0;
+
+    % Match original behavior: only report feature values at voxels that
+    % are themselves inside the tissue mask. Without this, box-filtered
+    % values "bleed" into background voxels near tissue edges (any voxel
+    % whose window overlaps tissue gets a non-zero value even if the
+    % voxel itself is background), which the original code never did —
+    % it explicitly skipped every non-mask center voxel.
+    maskExpanded = repmat(mask, [1 1 1 nFeat]);
+    texture(~maskExpanded) = 0;
 end
 
-% Reassemble glcm from cell array
-for i = 1:NL
-    glcm(:, i, :) = glcm_temp{i};
-end
-%{
-for i=1:NL
-    for j=1:NL
-        G = zeros(size(InsideMask),'uint8');
-        G(InsideMask) = vol_Gray(OffsetsMatrixS(InsideMask))==i&vol_Gray(OffsetsMatrixE(InsideMask))==j;
-        glcm(:,i,j) = sum(sum(G,3),2);
-    end
-    fprintf(repmat('\b',1,n));
-    msg = sprintf('%2.2f',i/NL*100);
-    fprintf([msg '%%']);
-    n=numel(msg)+1;                    
-end
-%}
-fprintf('\n');
-clear vol_Gray;
-norm_fact = sum(sum(glcm,3),2);
-glcm = glcm./repmat(norm_fact,[1 NL NL]);
-mask = repmat(mask,[1 1 1 NL NL]);
-GLCMS = zeros(SIZ(1),SIZ(2),SIZ(3),NL,NL,'single');
-GLCMS(mask) = glcm;
-end
-
-function [OffsetsMatrixS, OffsetsMatrixE] = AllOffsetsAllNeighbors(I,D,NeighborSizeRad,mask)
-Y = single(1:size(I,1));
-X = single(1:size(I,2));
-Z = single(1:size(I,3));
-[X,Y,Z] = meshgrid(X,Y,Z);
-X = X(mask(:));
-Y = Y(mask(:));
-Z = Z(mask(:));
-IND_s = single(sub2ind(size(I),Y,X,Z));
-% Computing all offsets at the voxel
-Offsets = single(ComputeOffsets(D));
-% For speed we can use half of offsets
-% Offsets = Offsets(1:size(Offsets,1)/2,:);
-Neighbors = single(ComputeOffsets(NeighborSizeRad));
-OffsetsMatrixS = single(repmat(IND_s,[1 ,size(Offsets,1),size(Neighbors,1)+1]));
-OffsetsMatrixE = zeros(size(OffsetsMatrixS),'single');
-fprintf('Computing Maps: ');
-n=0;
-for ofst=1:size(Offsets,1)
-    offset = Offsets(ofst,:);
-    Y_e = Y+offset(1);
-    X_e = X+offset(2);
-    Z_e = Z+offset(3);
-    isInMask = Y_e>0&X_e>0&Z_e>0&Y_e<=size(I,1)&X_e<=size(I,2)&Z_e<=size(I,3);
-    IND_e = sub2ind(size(I),Y_e(isInMask),X_e(isInMask),Z_e(isInMask));%End point of vector
-    %Check if it is masked
-    isInMask2 = mask(IND_e);
-    isInMask(isInMask) = isInMask2;
-    OffsetsMatrixE(isInMask,ofst,1) = IND_e(isInMask2);
-    % Computing all offsets at the neighbors of the voxel
-    for nb=1:size(Neighbors,1)
-        NeighborOffset = Neighbors(nb,:);
-        Y_ns = Y+NeighborOffset(1);
-        X_ns = X+NeighborOffset(2);
-        Z_ns = Z+NeighborOffset(3);
-        isInMask = Y_ns>0&X_ns>0&Z_ns>0&Y_ns<=size(I,1)&X_ns<=size(I,2)&Z_ns<=size(I,3);
-        IND_ns = sub2ind(size(I),Y_ns(isInMask),X_ns(isInMask),Z_ns(isInMask));
-        isInMask2 = mask(IND_ns);
-        isInMask(isInMask) = isInMask2;
-        OffsetsMatrixS(isInMask,ofst,nb+1) = IND_ns(isInMask2);
-        %Check if masked
-        Y_ne = Y_e+NeighborOffset(1);
-        X_ne = X_e+NeighborOffset(2);
-        Z_ne = Z_e+NeighborOffset(3);
-        isInMask = Y_ne>0&X_ne>0&Z_ne>0&Y_ne<=size(I,1)&X_ne<=size(I,2)&Z_ne<=size(I,3);
-        IND_ne = sub2ind(size(I),Y_ne(isInMask),X_ne(isInMask),Z_ne(isInMask));
-        isInMask2 = mask(IND_ne);
-        isInMask(isInMask) = isInMask2;
-        OffsetsMatrixE(isInMask,ofst,nb+1) = IND_ne(isInMask2);
-    end
-    fprintf(repmat('\b',1,n));
-    msg = sprintf('%2.2f',ofst/size(Offsets,1)*100);
-    fprintf([msg '%%']);
-    n=numel(msg)+1;                
-end
-fprintf('\n');
+function tf = isKey2(m, k)
+    tf = isKey(m,k);
 end
