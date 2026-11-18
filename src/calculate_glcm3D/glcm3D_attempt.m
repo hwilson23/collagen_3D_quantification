@@ -25,7 +25,7 @@ OPT.NeighborSizeList = [1 3 5 7];
 OPT.quantLevel       = 8;
 OPT.glcm_properties  = {'autoc','contr','corrm','corrp','cprom','cshad','dissi', ...
                         'energ','entro','homom','homop','maxpr','sosvh','savgh', ...
-                        'svarh','senth','dvarh','denth','inf1h','inf2h','indnc','idmnc'};
+                        'svarh','svarc','senth','dvarh','denth','inf1h','inf2h','indnc','idmnc'};
 
 % memory guard settings
 OPT.memFraction = 0.60;   % plan to use at most this fraction of AVAILABLE RAM
@@ -39,6 +39,7 @@ OPT.compress      = true;   % Deflate-compress TIFFs (background zeros shrink a 
 
 folder   = "/home/hwilson23/Documents/MATLAB_processing/maskapplied_timeseries_stacks";
 outpath  = "/home/hwilson23/Documents/MATLAB_processing/output_bksub_texture3D";
+if ~isfolder(outpath), mkdir(outpath); end
 % Keep the list OUTSIDE outpath (or at least don't move it with the tifs):
 listFile = "/home/hwilson23/Documents/MATLAB_processing/filelist.txt";
 
@@ -577,6 +578,11 @@ function texture = computeWindowedGLCMFeatures(SI, mask, NL, D, R, GLCM_feat)
         pxy = double(p_xplusy{k}) ./ totalSafe;
         svarh = svarh + (((k+1) - senth).^2) .* pxy;
     end
+    svarc = zeros(sz);
+    for k = 1:(2*NL-1)
+        pxy = double(p_xplusy{k}) ./ totalSafe;
+        svarc = svarc + (((k+1) - savgh).^2) .* pxy;
+    end
     denth = zeros(sz); dvarh = zeros(sz);
     for k = 1:NL
         pxmy = double(p_xminusy{k}) ./ totalSafe;
@@ -596,11 +602,12 @@ function texture = computeWindowedGLCMFeatures(SI, mask, NL, D, R, GLCM_feat)
     if has('savgh'), texture(:,:,:,featIdx('savgh')) = savgh; end
     if has('senth'), texture(:,:,:,featIdx('senth')) = senth; end
     if has('svarh'), texture(:,:,:,featIdx('svarh')) = svarh; end
+    if has('svarc'), texture(:,:,:,featIdx('svarc')) = svarc; end
     if has('denth'), texture(:,:,:,featIdx('denth')) = denth; end
     if has('dvarh'), texture(:,:,:,featIdx('dvarh')) = dvarh; end
-    clear savgh senth svarh denth dvarh
+    clear savgh senth svarh svarc denth dvarh
 
-    marginalOnly = {'savgh','senth','svarh','denth','dvarh'};
+    marginalOnly = {'savgh','senth','svarh','svarc','denth','dvarh'};
     if all(ismember(GLCM_feat, marginalOnly))
         texture = finalizeTexture(texture, mask);
         return
