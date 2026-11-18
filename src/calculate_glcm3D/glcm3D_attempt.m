@@ -1,5 +1,8 @@
+
 % ============================================================================
 % Windowed 3D GLCM texture pipeline — box-filter version, memory-safe
+
+%with square kernel
 %
 % Changes vs. the previous box-filter version:
 %   1. PRECISION: the integral image / running sums are done in double
@@ -19,9 +22,9 @@
 % ============================================================================
 
 %% ---------------------- user input ----------------------
-HOWMANYZ = 46;
+HOWMANYZ = 71;
 OPT.D                = 1;
-OPT.NeighborSizeList = [1 3 5 7];
+OPT.NeighborSizeList = [1 3];
 OPT.quantLevel       = 8;
 OPT.glcm_properties  = {'autoc','contr','corrm','corrp','cprom','cshad','dissi', ...
                         'energ','entro','homom','homop','maxpr','sosvh','savgh', ...
@@ -34,10 +37,11 @@ OPT.maxWaitSec  = 120;    % how long to wait for RAM to free up before skipping 
 
 % disk guard settings
 OPT.minFreeDiskGB = 20;     % never let free space on the output drive drop below this
-OPT.diskWaitSec   = 3600;   % wait this long for you to free space (move files), then stop cleanly
+OPT.diskWaitSec   = 360;   % wait this long for you to free space (move files), then stop cleanly
 OPT.compress      = true;   % Deflate-compress TIFFs (background zeros shrink a lot)
 
-folder   = "/home/hwilson23/Documents/MATLAB_processing/maskapplied_timeseries_stacks";
+%folder   = "/home/hwilson23/Documents/MATLAB_processing/maskapplied_timeseries_stacks";
+folder = "/home/hwilson23/Documents/MATLAB_processing/testingdata231";
 outpath  = "/home/hwilson23/Documents/MATLAB_processing/output_bksub_texture3D";
 if ~isfolder(outpath), mkdir(outpath); end
 % Keep the list OUTSIDE outpath (or at least don't move it with the tifs):
@@ -205,7 +209,7 @@ fprintf('End Time: %s\n', datestr(now));
 %                              FILE LIST HELPERS
 % ============================================================================
 function nm = makeOutName(justname, time, prop, D, R, Q)
-    nm = sprintf('%s_t%d_%s_3D_D%d_R%d_Q%d_raw.tif', justname, time, prop, D, R, Q);
+    nm = sprintf('%s_t%d_%s_3D_D%d_R%d_Q%d_raw.tif', justname, prop, D, R, Q);
 end
 
 function s = loadFileList(listFile)
@@ -243,7 +247,7 @@ function writeTiffStack(path, vol, compress)
         tag.RowsPerStrip = size(slice,1);
         tag.PlanarConfiguration = Tiff.PlanarConfiguration.Chunky;
         if compress
-            tag.Compression = Tiff.Compression.Deflate;   % lossless
+            tag.Compression = Tiff.Compression.AdobeDeflate;   % lossless
         end
         t.setTag(tag);
         t.write(slice);
@@ -289,6 +293,7 @@ function ensureMemory(neededBytes, minFreeBytes, maxWaitSec)
     t0 = tic;
     while true
         avail = getAvailableMemBytes();
+        fprintf(['available memory:',avail])
         if avail >= neededBytes + minFreeBytes, return; end
         if toc(t0) > maxWaitSec
             error('GLCM:memory', ['need ~%.1f GB (+%.1f GB reserve) but only %.1f GB is ' ...
