@@ -24,7 +24,7 @@
 %% ---------------------- user input ----------------------
 HOWMANYZ = 71;
 OPT.D                = 1;
-OPT.NeighborSizeList = [1 3];
+OPT.NeighborSizeList = [1,3];
 OPT.quantLevel       = 8;
 OPT.glcm_properties  = {'autoc','contr','corrm','corrp','cprom','cshad','dissi', ...
                         'energ','entro','homom','homop','maxpr','sosvh','savgh', ...
@@ -36,13 +36,13 @@ OPT.minFreeGB   = 2;      % always leave at least this much RAM free
 OPT.maxWaitSec  = 120;    % how long to wait for RAM to free up before skipping a job
 
 % disk guard settings
-OPT.minFreeDiskGB = 20;     % never let free space on the output drive drop below this
-OPT.diskWaitSec   = 360;   % wait this long for you to free space (move files), then stop cleanly
+OPT.minFreeDiskGB = 50;     % never let free space on the output drive drop below this
+OPT.diskWaitSec   = 1;   % wait this long for you to free space (move files), then stop cleanly
 OPT.compress      = true;   % Deflate-compress TIFFs (background zeros shrink a lot)
 
 %folder   = "/home/hwilson23/Documents/MATLAB_processing/maskapplied_timeseries_stacks";
-folder = "/home/hwilson23/Documents/MATLAB_processing/testingdata231";
-outpath  = "/home/hwilson23/Documents/MATLAB_processing/output_bksub_texture3D";
+folder = "/home/hwilson23/Documents/MATLAB_processing/maskapplied_timeseries_stacks_231s";
+outpath  = "/media/hwilson23/9a2ae3cc-a5be-40d4-ba72-c5f598d7d2b1/helen/output_bksub_texture3d_231newscript";
 if ~isfolder(outpath), mkdir(outpath); end
 % Keep the list OUTSIDE outpath (or at least don't move it with the tifs):
 listFile = "/home/hwilson23/Documents/MATLAB_processing/filelist.txt";
@@ -93,7 +93,10 @@ if answerwas == "0"
     return
 end
 
-%% ---------------------- main loop ----------------------
+%% ---------------------- main loop ---------------------
+fprintf('RAM available: %.1f GB | Disk free on outpath: %.1f GB\n', ...
+    getAvailableMemBytes()/2^30, getFreeDiskBytes(outpath)/2^30);
+stopRun = false;
 for i = 1:length(filenames)
 
     [~, justname, ~] = fileparts(filenames{i});
@@ -102,7 +105,7 @@ for i = 1:length(filenames)
     pending = false;
     for R = OPT.NeighborSizeList
         for prop = 1:numel(OPT.glcm_properties)
-            nm = makeOutName(justname, time, OPT.glcm_properties{prop}, OPT.D, R, OPT.quantLevel);
+            nm = makeOutName(justname, OPT.glcm_properties{prop}, OPT.D, R, OPT.quantLevel);
             if ~isDone(nm), pending = true; end
         end
     end
@@ -149,7 +152,7 @@ for i = 1:length(filenames)
 
         names = cell(1, numel(OPT.glcm_properties));
         for prop = 1:numel(names)
-            names{prop} = makeOutName(justname, time, OPT.glcm_properties{prop}, OPT.D, R, OPT.quantLevel);
+            names{prop} = makeOutName(justname, OPT.glcm_properties{prop}, OPT.D, R, OPT.quantLevel);
         end
         todo = find(~cellfun(isDone, names));
         if isempty(todo)
@@ -160,7 +163,9 @@ for i = 1:length(filenames)
 
         % make sure the outputs will fit BEFORE spending time computing them
         % (uncompressed size is used as a conservative upper bound)
-        ensureDisk(outpath, numel(todo) * prod(origsize) * 4, OPT.minFreeDiskGB * 2^30, OPT.diskWaitSec);
+        if ~ensureDisk(outpath, numel(todo) * prod(origsize) * 4, OPT.minFreeDiskGB * 2^30, OPT.diskWaitSec)
+            stopRun = true; break
+        end
 
         timerStart = tic;
         fprintf('Processing %s | NL=%d | R=%d | %d feature(s)\n', justname, OPT.quantLevel, R, numel(feats));
@@ -183,7 +188,10 @@ for i = 1:length(filenames)
 
             finalPath = fullfile(outpath, names{todo(k)});
             tmpPath   = [finalPath '.part'];
-            ensureDisk(outpath, numel(fullimg) * 4, OPT.minFreeDiskGB * 2^30, OPT.diskWaitSec);
+            
+            if ~ensureDisk(outpath, numel(fullimg) * 4, OPT.minFreeDiskGB * 2^30, OPT.diskWaitSec)
+                stopRun = true; break
+            end
             try
                 writeTiffStack(tmpPath, fullimg, OPT.compress);
                 movefile(tmpPath, finalPath);          % only complete files get the real name
@@ -195,21 +203,24 @@ for i = 1:length(filenames)
             doneSet(names{todo(k)}) = true;
             clear fullimg
         end
+        if stopRun, break; end
         clear texture
     end
+    if stopRun, break;end
     clear SI cropMask
     disp("file saved!")
 end
 
-disp("all done");
+if stopRun, disp("stopped early: low disk space"); else, disp("all done"); end
 fprintf('End Time: %s\n', datestr(now));
 
 
 % ============================================================================
 %                              FILE LIST HELPERS
 % ============================================================================
-function nm = makeOutName(justname, time, prop, D, R, Q)
-    nm = sprintf('%s_t%d_%s_3D_D%d_R%d_Q%d_raw.tif', justname, prop, D, R, Q);
+
+function nm = makeOutName(justname, prop, D, R, Q)
+nm = sprintf('%s_%s_3D_D%d_R%d_Q%d_raw.tif', justname, prop, D, R, Q);
 end
 
 function s = loadFileList(listFile)
@@ -282,7 +293,7 @@ function b = getAvailableMemBytes()
             b = min(b, str2double(lim) - cur);
         end
     catch
-    end
+    end 
     if isinf(b) && isempty(warned)
         warning('Could not determine available memory; memory guard is disabled.');
         warned = true;
@@ -293,7 +304,7 @@ function ensureMemory(neededBytes, minFreeBytes, maxWaitSec)
     t0 = tic;
     while true
         avail = getAvailableMemBytes();
-        fprintf(['available memory:',avail])
+        
         if avail >= neededBytes + minFreeBytes, return; end
         if toc(t0) > maxWaitSec
             error('GLCM:memory', ['need ~%.1f GB (+%.1f GB reserve) but only %.1f GB is ' ...
@@ -307,40 +318,33 @@ function ensureMemory(neededBytes, minFreeBytes, maxWaitSec)
 end
 
 function b = getFreeDiskBytes(p)
-% Free bytes on the filesystem holding path p (uses `df`, Linux/macOS).
-    persistent warned
-    b = Inf;
+    b = NaN;
     try
         [st, out] = system(sprintf('df -Pk "%s"', p));
         if st == 0
             lines = strsplit(strtrim(out), newline);
-            f = strsplit(strtrim(lines{end}));   % Filesystem 1K-blocks Used Available Capacity Mounted
+            f = strsplit(strtrim(lines{end}));
             b = str2double(f{4}) * 1024;
         end
     catch
     end
-    if (isnan(b) || isinf(b)) && isempty(warned)
-        warning('Could not determine free disk space; disk guard is disabled.');
-        warned = true;
-        b = Inf;
+    if isnan(b)
+        error('GLCM:disk', 'Could not read free disk space for %s; stopping for safety.', p);
     end
 end
 
-function ensureDisk(p, neededBytes, reserveBytes, maxWaitSec)
-% Waits (polling every 60 s) for enough free space, e.g. while you move
-% finished files to another drive. After maxWaitSec it stops the script with
-% an error; the file list is always consistent, so a re-run resumes cleanly.
-    t0 = tic;
+function ok = ensureDisk(p, neededBytes, reserveBytes, maxWaitSec)
+    t0 = tic; ok = true;
     while true
         free = getFreeDiskBytes(p);
         if free >= neededBytes + reserveBytes, return; end
-        if toc(t0) > maxWaitSec
-            error('GLCM:disk', ['Only %.1f GB free on the output drive (need %.1f GB + %.1f GB reserve). ' ...
-                  'Move finished files elsewhere and re-run; completed outputs are in the file list.'], ...
-                  free/2^30, neededBytes/2^30, reserveBytes/2^30);
+        if toc(t0) >= maxWaitSec
+            fprintf(['STOPPING: %.1f GB free on output drive, need %.1f GB + %.1f GB reserve.\n' ...
+                     'Move finished files elsewhere and re-run; completed outputs are in the file list.\n'], ...
+                     free/2^30, neededBytes/2^30, reserveBytes/2^30);
+            ok = false; return;
         end
-        fprintf('  disk low: %.1f GB free, need %.1f GB + %.1f GB reserve. Move files off %s; retrying in 60 s...\n', ...
-                free/2^30, neededBytes/2^30, reserveBytes/2^30, p);
+        fprintf('  disk low: %.1f GB free. Retrying in 60 s...\n', free/2^30);
         pause(60);
     end
 end
