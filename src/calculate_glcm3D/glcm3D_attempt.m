@@ -24,7 +24,7 @@
 %% ---------------------- user input ----------------------
 HOWMANYZ = 71;
 OPT.D                = 1;
-OPT.NeighborSizeList = [1,3];
+OPT.NeighborSizeList = [7];
 OPT.quantLevel       = 8;
 OPT.glcm_properties  = {'autoc','contr','corrm','corrp','cprom','cshad','dissi', ...
                         'energ','entro','homom','homop','maxpr','sosvh','savgh', ...
