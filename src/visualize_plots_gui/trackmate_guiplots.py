@@ -15,14 +15,6 @@ WHAT IT DOES
    cell IDs (e.g. cell_0000 vs cell 0) seamlessly.
 3. Renders 2D slices across Z and T for raw channel stacks and cell mask overlays.
 4. Plots feature values over time for selected cells and radii.
-
-REQUIREMENTS
-------------
-    pip install pandas numpy tifffile matplotlib
-
-RUN
----
-    python collagen_viewer.py
 """
 
 import os
@@ -69,7 +61,7 @@ DEFAULT_CHANNEL_KEYWORDS = {
     "R": "R1"
 }
 
-DATAFRAME_MUST_CONTAIN = ["dataframe_byslice_pos", "trackmate"]
+DATAFRAME_MUST_CONTAIN = ["dataframe_wholemask_pos", "trackmate"]
 
 DROP_COLS = ['TotalImageArea', 'distance3d', 
              'bin_num3d', 'roi', 'type']

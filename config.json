@@ -1,9 +1,9 @@
 {
   "_comment": "Single source of truth for all paths and parameters. Edit here — Python and MATLAB both read this file.",
 
-  "data_root": "G:/UTSW_BJChang",
-  "experiment": "",
-  "experiment_endpoint": "",
+  "data_root": "G:\\FluorescentCollagen\\20261111_flucol_fbstreated\\flucol_fastprot_2mg_fbstreated\\",
+  "experiment": "flucol_10permedia_800_40x_1",
+  "experiment_endpoint": "flucol_10permedia_800_40x_1",
 
   "external": {
     "twombli_csv":    "",
@@ -11,9 +11,27 @@
   },
 
   "params": {
-    "z_step":     2.0,
-    "stacks":     [""],
+    "z_step":     0.5,
+    "xy_pixel_um": 0.3469,
+    "stacks":     ["Pos0"],
     "min_fibers": 30
+  },
+
+  "mask": {
+    "_comment": "3D sphere/shell mask generation (trackmate_shell_masks.py). shell_radii_um entries are [inner_um, outer_um]; inner_um=0 gives a solid sphere.",
+    "csv_path":   "G:\\FluorescentCollagen\\20261111_flucol_fbstreated\\flucol_fastprot_2mg_fbstreated\\flucol_10permedia_800_40x_1\\trackmatemasks",
+    "image_path": "G:\\FluorescentCollagen\\20261111_flucol_fbstreated\\flucol_fastprot_2mg_fbstreated\\flucol_10permedia_800_40x_1",
+    "cellprefix": "C1-",
+    "out_dir":    "G:\\FluorescentCollagen\\20261111_flucol_fbstreated\\flucol_fastprot_2mg_fbstreated\\flucol_10permedia_800_40x_1\\trackmatemasks",
+    "csv_units": "um",
+    "z_profile_disk_px": 10,
+    "clip_z_boundary": true,
+    "shell_radii_um": [
+      [0,10],
+      [10, 20], 
+      [20, 30],
+      [30, 40]
+    ]
   },
 
   "glcm": {
@@ -21,20 +39,19 @@
     "folder_ep":   "",
     "outpath_ep":  "",
     "outpath_TOP": "",
-    "folder_ts":   "G:/UTSW_BJChang/Cell7_bksub",
-    "outpath_ts":  "G:/UTSW_BJChang/output_bksub_texture3D",
+    "folder_ts":   "G:\\FluorescentCollagen\\20261111_flucol_fbstreated\\flucol_fastprot_2mg_fbstreated\\flucol_10permedia_800_40x_1\\maskapplied_timeseries_stacks",
+    "outpath_ts":  "G:\\FluorescentCollagen\\20261111_flucol_fbstreated\\flucol_fastprot_2mg_fbstreated\\output_bksub_texture3d_231newscript",
     "folder_gpu":  "",
     "outpath_gpu": "",
 
     "D":              1,
-    "NeighborSize":   1,
-    "quantLevel":     8,
+    "NeighborSize":   [1,3,7],
+    "quantLevel":     [8,16],
     "glcm_properties": ["autoc","contr","corrm","corrp","cprom","cshad","dissi",
                          "energ","entro","homom","homop","maxpr","sosvh","savgh",
                          "svarh","senth","dvarh","denth","inf1h","inf2h","indnc","idmnc"],
 
-    "num_timepoints": 51,
-    "num_z_slices":   168,
-    "num_quadrants":  8
+    "num_timepoints": 65,
+    "num_z_slices":   71
   }
 }

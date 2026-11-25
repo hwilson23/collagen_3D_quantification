@@ -9,7 +9,9 @@ import itertools
 import re
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
-from config import PATHS, PARAMS, MASK_RADII_UM
+from config import PATHS, PARAMS, MASK_RADII_UM, EXPERIMENT
+
+datasetname = EXPERIMENT
 
 
 def radius_tag(inner_radius_um, outer_radius_um):
@@ -59,7 +61,7 @@ def reshape_texture(df):
     ]
     stat_cols = [col for col in stat_cols if col in df.columns]
 
-    index_cols = ["image_name", "slice", "position", "cell","timepoint","distance3d","neighbor3d","bin_num3d"]
+    index_cols = ["image_name", "position", "cell","timepoint","distance3d","neighbor3d","bin_num3d"]
 
     if not stat_cols:
         return df
@@ -128,8 +130,8 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
 
     idx = nospace_name.find("3D")
     
-    #timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
-    timepoint= int(re.search(r'CH01_(\d+)', nospace_name).group(1))-1
+    timepoint = int(re.search(r'_t(\d+)', nospace_name).group(1))-1  # Adjusted for zero-based indexing
+    #timepoint= int(re.search(r'CH01_(\d+)', nospace_name).group(1))-1
 
     # Load masks
     masks = {}
@@ -140,6 +142,8 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
                 full_path = os.path.join(folder_path, fname)
                 mask_img = tiff.imread(full_path, out='memmap')
                 mask_img = np.transpose(mask_img,(2,3,1,0))
+                if timepoint >= mask_img.shape[3]:
+                    continue
                 mask_img = mask_img[:,:,:,timepoint]
 
                 if re.search(r'cell_(\d+)', fname) is not None:
@@ -166,8 +170,8 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
     imgstats = {
         #"slice": z + 1,
         "image_name": nospace_name[:idx-7],
-        #"timepoint": int(re.search(r'_t(\d+)', nospace_name).group(1))-1,
-        "timepoint": int(re.search(r'CH01_(\d+)', nospace_name).group(1))-1,
+        "timepoint": int(re.search(r'_t(\d+)', nospace_name).group(1))-1,
+        #"timepoint": int(re.search(r'CH01_(\d+)', nospace_name).group(1))-1,
         "mask_type": "full",
         "texture_type": nospace_name.split('_')[-6],
         #"position": re.search(r'Pos(\d+)',pos).group(1),
@@ -188,6 +192,7 @@ def image_stats_glcm3D(pos, imagepath, mask_paths_dict, stackstats):
             #current_mask = data["mask_stack"][:, :, z]
             current_mask = data["mask_stack"]
             #masked_pixels = currentim[current_mask > 0]
+            #print("FILE:", imgstats["image_name"], "| img:", img.shape, img.dtype, "| mask:", current_mask.shape)
             masked_pixels = img[current_mask > 0]
             stats = compute_stats(masked_pixels)
 
@@ -317,9 +322,9 @@ if __name__ == "__main__":
     for pos in unique_pos:
         pos_df = collapseddf[collapseddf['position'] == pos]
         
-        pos_df.to_csv(f"dataframe_wholemask_pos_{pos}_3Dtrackmate.csv", index=False)
+        pos_df.to_csv(f"{datasetname}_dataframe_wholemask_pos_{pos}_3Dtrackmate.csv", index=False)
         
         print("Saved position dataframes separately")
 
     # Also save the combined dataframe
-    collapseddf.to_csv("finalcollapsed_dataframe_wholemask_trackmate.csv", index=False)
+    collapseddf.to_csv(f"{datasetname}_finalcollapsed_dataframe_wholemask_trackmate.csv", index=False)

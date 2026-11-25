@@ -28,13 +28,18 @@ with open(CONFIG_PATH, 'r') as f:
 _mask_cfg   = _cfg['mask']
 _params_cfg = _cfg['params']
 
+
 csv_dir   = _mask_cfg['csv_path']    # folder containing per-position TrackMate CSVs
 image_dir = _mask_cfg['image_path']  # folder containing per-position TIFF stacks
 out_dir   = _mask_cfg['out_dir']
+cellprefix = _mask_cfg['cellprefix']  # prefix for cell channel images (e.g. 'C1-' or 'C2-')
 
 xy_pixel_um = _params_cfg['xy_pixel_um']   # microns per XY pixel
 z_step_um   = _params_cfg['z_step']        # microns per Z slice
 stacks      = _params_cfg['stacks']        # e.g. ["Pos0", "Pos1", "Pos2", "Pos4", "Pos5", "Pos6"]
+
+csv_units = _mask_cfg.get('csv_units', 'um')
+csv_um_per_px = xy_pixel_um if csv_units == 'um' else 1.0
 
 # ---------------------------------------------------------------------------
 # SHELL / DOUGHNUT RADII
@@ -312,8 +317,8 @@ def create_3d_shell_masks(image_tzyx, particles,
             if t_abs not in track:
                 continue
             x_um, y_um = track[t_abs]
-            col = int(round(x_um / xy_pixel_um))
-            row = int(round(y_um / xy_pixel_um))
+            col = int(round(x_um / csv_um_per_px))
+            row = int(round(y_um / csv_um_per_px))
             if 0 <= row < H and 0 <= col < W:
                 active.append((particle_id, row, col))
 
@@ -346,7 +351,7 @@ if __name__ == '__main__':
         # ── Resolve this position's CSV and image file from the config folders ──
         try:
             csv_path   = find_position_file(csv_dir, pos_tag, '.csv')
-            image_path = find_position_file(image_dir, pos_tag, '.tif', prefix='C2-')
+            image_path = find_position_file(image_dir, pos_tag, '.tif', cellprefix)
         except (FileNotFoundError, ValueError) as e:
             print(f"\n=== {pos_tag} === SKIPPED: {e}")
             continue
@@ -379,6 +384,10 @@ if __name__ == '__main__':
             # ── Parse CSV ───────────────────────────────────────────────────────
             print("Parsing TrackMate CSV...")
             particles = parse_spots_csv(csv_path)
+            print(f"CONFIG: {CONFIG_PATH}")
+            print(f"csv_units={csv_units!r}, csv_um_per_px={csv_um_per_px}, xy_pixel_um={xy_pixel_um}")
+
+            
             n_particles = len(particles)
             print(f"  {n_particles} tracks loaded")
 

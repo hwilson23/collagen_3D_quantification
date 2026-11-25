@@ -21,16 +21,16 @@ _base_ep = DATA_ROOT / _cfg["experiment_endpoint"]
 
 PATHS = {
     "masked_stacks":     _sel / " ",
-    "masks":             _sel / "trackmatemasks",
+    "masks":             Path(_cfg["mask"]["out_dir"]),#_sel / "trackmatemasks",
     "masked_output":     _sel / " ",
     "indiv_imgs":        _sel / " ",
     "ctfire_out":        _sel / " ",
     "ctfire_results":    _sel / " ",
-    "texture3d":         _sel / "output_bksub_texture3D" / "stitched",
+    "texture3d":         Path(_cfg["glcm"]["outpath_ts"]),#_sel / "20260519_stained_analysis\\output_bksub_texture3D_wnuc_kernelredo",
     "ctfire_results_ep": _base_ep / " ",
     "texture2d_ep":      _base_ep / " ",
 }
-
+MASK_RADII_UM = [tuple(pair) for pair in _cfg["mask"]["shell_radii_um"]]
 EXTERNAL = {k: Path(v) for k, v in _cfg["external"].items()}
 
 PARAMS = _cfg["params"]
