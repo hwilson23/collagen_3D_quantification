@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import tifffile
@@ -127,6 +127,8 @@ def compute_global_percentile_range(
     high_pct: float = 99.5,
     num_z_slices: int | None = None,
     time_index: int = 1,
+    verbose: bool = False,
+    progress_callback: Callable[[float, float, str], None] | None = None,
 ) -> tuple[float, float]:
     """Compute foreground (``> 0``) intensity percentiles across all input TIFFs.
 
@@ -139,8 +141,21 @@ def compute_global_percentile_range(
 
     hist_counts = np.zeros(65536, dtype=np.int64)
     fallback_chunks: list[np.ndarray] | None = None
+    n_files = len(tiff_paths)
 
-    for p in tiff_paths:
+    for idx, p in enumerate(tiff_paths, start=1):
+        name = Path(p).name
+        if verbose:
+            print(
+                f"Scanning [{idx}/{n_files}] {name} for global intensity range...",
+                flush=True,
+            )
+        if progress_callback is not None:
+            progress_callback(
+                float(idx - 1),
+                float(n_files),
+                f"Scanning [{idx}/{n_files}] {name} for intensity range",
+            )
         vol = read_tiff_volume(p, num_z_slices=num_z_slices, time_index=time_index)
         fg = vol[vol > 0]
         if fg.size == 0:

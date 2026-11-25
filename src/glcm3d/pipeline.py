@@ -66,23 +66,31 @@ def run_pipeline(
         return (name in done_set) or (out_path / name).is_file()
 
     if verbose:
-        print(f"{len(done_set)} outputs already listed in {list_path}")
+        print(f"{len(done_set)} outputs already listed in {list_path}", flush=True)
 
     stale = clean_stale_part_files(out_path)
     if verbose:
         for p in stale:
-            print(f"Deleted stale partial file {p.name}")
+            print(f"Deleted stale partial file {p.name}", flush=True)
 
     # Global foreground percentile range over ALL input files
+    n_files = len(tiff_paths)
+    scan_cb = (
+        (lambda cur, tot, msg: progress_callback(0.0, float(n_files), msg))
+        if progress_callback is not None
+        else None
+    )
     setmin, setmax = compute_global_percentile_range(
         tiff_paths,
         low_pct=cfg.low_percentile,
         high_pct=cfg.high_percentile,
         num_z_slices=cfg.num_z_slices,
         time_index=cfg.time_index,
+        verbose=verbose,
+        progress_callback=scan_cb,
     )
     if verbose:
-        print(f"Full dataset percentile range: {setmin:g} .. {setmax:g}")
+        print(f"Full dataset percentile range: {setmin:g} .. {setmax:g}", flush=True)
 
     if interactive:
         ans = input("continue? 1-yes/0-no: ").strip()
@@ -97,7 +105,8 @@ def run_pipeline(
     if verbose:
         print(
             f"RAM available: {get_available_mem_bytes() / 2**30:.1f} GB | "
-            f"Disk free on outpath: {get_free_disk_bytes(out_path) / 2**30:.1f} GB"
+            f"Disk free on outpath: {get_free_disk_bytes(out_path) / 2**30:.1f} GB",
+            flush=True,
         )
 
     processed: list[str] = []
@@ -134,6 +143,8 @@ def run_pipeline(
                 )
             continue
 
+        if verbose:
+            print(f"Loading [{f_idx + 1}/{n_files}] {tif_path.name}...", flush=True)
         vol = read_tiff_volume(
             tif_path,
             num_z_slices=cfg.num_z_slices,

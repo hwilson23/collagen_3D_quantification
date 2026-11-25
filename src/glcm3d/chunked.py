@@ -87,7 +87,8 @@ def compute_chunked(
     if verbose:
         print(
             f"  memory: avail {avail / 2**30:.1f} GB, budget {budget / 2**30:.1f} GB "
-            f"-> slabs of {core} planes (+/-{halo} halo) along axis {cdim}"
+            f"-> slabs of {core} planes (+/-{halo} halo) along axis {cdim}",
+            flush=True,
         )
 
     mask_bool = np.asarray(mask, dtype=bool)
