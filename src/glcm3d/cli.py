@@ -101,11 +101,12 @@ def _run_with_rich(
     list_file: str | None,
     interactive: bool,
 ) -> dict:
-    from rich.console import Console
+    from rich import box
+    from rich.console import Console, Group
+    from rich.live import Live
     from rich.panel import Panel
     from rich.progress import (
         BarColumn,
-        MofNCompleteColumn,
         Progress,
         SpinnerColumn,
         TaskProgressColumn,
@@ -114,6 +115,7 @@ def _run_with_rich(
         TimeRemainingColumn,
     )
     from rich.table import Table
+    from rich.text import Text
 
     console = Console()
     mode = "Single file" if in_path.is_file() else "Directory batch"
@@ -132,7 +134,19 @@ def _run_with_rich(
         f"{len(cfg.features)} feature(s)",
     )
     info.add_row("Resources:", f"RAM avail {avail_gb:.1f} GB  |  Disk free {disk_gb:.1f} GB")
-    console.print(Panel(info, title="[bold]glcm3D[/bold]", border_style="cyan", expand=False))
+
+    console.print()
+    console.print(
+        Panel(
+            info,
+            title="[bold]glcm3D[/bold]",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+    console.print()
 
     t0 = time.monotonic()
 
@@ -150,22 +164,38 @@ def _run_with_rich(
         )
     else:
         progress = Progress(
+            TextColumn("  "),
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
             BarColumn(bar_width=32),
             TaskProgressColumn(),
+            TextColumn("[dim]•[/dim]"),
             TimeElapsedColumn(),
+            TextColumn("[dim]ETA[/dim]"),
             TimeRemainingColumn(),
             console=console,
-            transient=False,
         )
-        with progress:
-            task_id = progress.add_task("Initializing...", total=100.0)
+        task_id = progress.add_task("Overall", total=100.0)
+        status_line = Text(
+            "    └─ Initializing...",
+            style="cyan",
+            no_wrap=True,
+            overflow="ellipsis",
+        )
+
+        with Live(
+            Group(progress, status_line),
+            console=console,
+            refresh_per_second=4,
+            vertical_overflow="crop",
+        ) as live:
 
             def _rich_cb(current: float, total: float, message: str) -> None:
                 pct = (100.0 * current / total) if total > 0 else 100.0
                 pct = min(100.0, max(0.0, pct))
-                progress.update(task_id, completed=pct, description=message)
+                progress.update(task_id, completed=pct)
+                status_line.plain = f"    └─ {message}"
+                live.refresh()
 
             if in_path.is_file():
                 summary = run_single_file(
@@ -186,26 +216,41 @@ def _run_with_rich(
                     progress_callback=_rich_cb,
                 )
             if not summary["stopped_early"]:
-                progress.update(task_id, completed=100.0, description="Complete")
+                progress.update(task_id, completed=100.0)
+                status_line.plain = f"    └─ Complete ({len(summary['processed'])} output(s) written)"
+                status_line.style = "green"
+                live.refresh()
 
     elapsed = time.monotonic() - t0
-    res_table = Table(title="Run Summary", show_header=False, border_style="green" if not summary["stopped_early"] else "yellow")
-    res_table.add_column("Metric", style="bold")
-    res_table.add_column("Value")
+    res_grid = Table.grid(padding=(0, 3))
+    res_grid.add_column(style="bold", justify="right")
+    res_grid.add_column()
     status_str = (
         "[bold yellow]Stopped early (low disk or cancelled)[/bold yellow]"
         if summary["stopped_early"]
         else "[bold green]Complete[/bold green]"
     )
-    res_table.add_row("Status", status_str)
+    res_grid.add_row("Status:", status_str)
     irange = summary.get("intensity_range")
     if irange is not None:
-        res_table.add_row("Intensity range", f"{irange[0]:g} .. {irange[1]:g}")
-    res_table.add_row("Outputs written", str(len(summary["processed"])))
-    res_table.add_row("Skipped", str(len(summary["skipped"])))
-    res_table.add_row("Elapsed time", f"{elapsed:.2f} s")
-    res_table.add_row("Output folder", str(out_path))
-    console.print(res_table)
+        res_grid.add_row("Intensity range:", f"{irange[0]:g} .. {irange[1]:g}")
+    res_grid.add_row("Outputs written:", str(len(summary["processed"])))
+    res_grid.add_row("Skipped:", str(len(summary["skipped"])))
+    res_grid.add_row("Elapsed time:", f"{elapsed:.2f} s")
+    res_grid.add_row("Output folder:", str(out_path))
+
+    console.print()
+    console.print(
+        Panel(
+            res_grid,
+            title="[bold]Run Summary[/bold]",
+            border_style="green" if not summary["stopped_early"] else "yellow",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+    console.print()
     return summary
 
 
